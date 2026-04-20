@@ -346,9 +346,11 @@ class PipelineService:
             article_category=score_result.get("article_category"),
         )
 
-        # Auto-save CMS draft for scores above 70
+        # Auto-save CMS draft for scores 70-74 (articles that won't be auto-published)
+        # Articles with score >= 75 will be handled by the auto-publish scheduler directly
+        # and should NOT be saved as draft to avoid duplicate articles when published
         score = score_result["score"]
-        if score is not None and score > 70:
+        if score is not None and 70 <= score < 75:
             # LLM 优化文章（如果启用）
             enable_llm_optimization = self.database.get_setting("llm_optimization_enabled") == "true"
             enable_author_info = self.database.get_setting("llm_author_info_enabled") == "true"
@@ -481,9 +483,27 @@ class PipelineService:
         """
         prepared = self._merge_database_article_fields(article)
 
+        # If article is already a draft, we should update it to published instead of creating a new one
+        # The CMS API should handle this when we pass the existing cms_id
+        current_stage = prepared.get("publish_stage", "local")
+        existing_cms_id = prepared.get("cms_id", "")
+
         # Step 1: Publish to CMS
         pub_result = self.publisher.publish(prepared)
         cms_id = pub_result["cms_id"]
+
+        # Check if CMS created a duplicate article
+        if current_stage == "draft" and existing_cms_id and str(cms_id) != str(existing_cms_id):
+            log.error(
+                "DUPLICATE DETECTED: Article %s had draft cms_id=%s but publish returned cms_id=%s. "
+                "This creates a duplicate article in CMS. Consider reviewing the CMS API behavior.",
+                prepared["article_id"],
+                existing_cms_id,
+                cms_id,
+            )
+            # We still proceed with the new cms_id since the old draft is now orphaned
+            # TODO: Consider deleting the old draft if CMS API supports it
+
         prepared["cms_id"] = cms_id
         prepared["publish_stage"] = "published"
 
