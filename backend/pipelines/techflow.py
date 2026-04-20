@@ -69,12 +69,25 @@ class TechFlowScraper(BaseScraper):
     # -- Detail fetching --
 
     def fetch_detail(self, item: dict) -> dict:
+        """Fetch and parse article detail from TechFlow.
+
+        提取规则：
+        1. 跳过 <div class="quote"> 开头引用语
+        2. 提取 style="color: rgb(140, 140, 140)" 的作者/编辑信息
+        3. 作者/编辑信息放到文章最后，与来源一起显示
+        """
         html = self.fetch_html(item["original_url"])
         soup = BeautifulSoup(html, "html.parser")
         article = soup.find("article") or soup.find("main") or soup.body
         title = soup.find("h1").get_text(" ", strip=True) if soup.find("h1") else item["title"]
         blocks, cover_src = [], ""
-        for el in article.find_all(["h2", "h3", "p", "img"]):
+        author_parts = []  # 存储作者、编辑信息的原始格式
+
+        for el in article.find_all(["h2", "h3", "p", "img", "div"]):
+            # 跳过引用语块 <div class="quote">
+            if el.name == "div" and "quote" in (el.get("class") or []):
+                continue
+
             if el.name == "img":
                 src = el.get("src") or ""
                 if src and src.startswith("http"):
@@ -82,21 +95,65 @@ class TechFlowScraper(BaseScraper):
                         cover_src = src
                     blocks.append({"type": "img", "src": src, "alt": el.get("alt", "")})
                 continue
-            text = el.get_text(" ", strip=True)
-            if not text or text in {title, "TechFlow Selected 深潮精选"} or self._is_leadin_text(text):
-                continue
-            if self._is_hook_text(text):
-                break
-            blocks.append({"type": el.name, "text": text})
+
+            # 检查是否是作者/编辑信息（灰色文字）
+            # 样式可能是：color: rgb(140, 140, 140) 或 color:rgb(140,140,140)
+            if el.name == "p":
+                text = el.get_text(" ", strip=True)
+                is_gray = False
+
+                # 检查 p 标签本身的 style 属性
+                if el.get("style"):
+                    style = el.get("style", "").replace(" ", "")
+                    if "rgb(140" in style or "rgb(140,140,140)" in style:
+                        is_gray = True
+
+                # 检查内部 span 元素的 style 属性
+                if not is_gray:
+                    for span in el.find_all("span"):
+                        if span.get("style"):
+                            style = span.get("style", "").replace(" ", "")
+                            if "rgb(140" in style or "rgb(140,140,140)" in style:
+                                is_gray = True
+                                break
+
+                # 如果是灰色文字且包含作者/编辑信息，提取并跳过
+                if is_gray and text:
+                    if text.startswith("作者｜"):
+                        author_parts.append(text)
+                        continue
+                    elif text.startswith("编辑｜"):
+                        author_parts.append(text)
+                        continue
+
+            if el.name in ["h2", "h3"]:
+                text = el.get_text(" ", strip=True)
+                if not text or text in {title, "TechFlow Selected 深潮精选"} or self._is_leadin_text(text):
+                    continue
+                if self._is_hook_text(text):
+                    break
+                blocks.append({"type": el.name, "text": text})
+            elif el.name == "p":
+                text = el.get_text(" ", strip=True)
+                if not text or text in {title, "TechFlow Selected 深潮精选"} or self._is_leadin_text(text):
+                    continue
+                if self._is_hook_text(text):
+                    break
+                blocks.append({"type": "p", "text": text})
+
         while blocks and blocks[-1].get("type") != "img" and self._is_hook_text(blocks[-1].get("text", "")):
             blocks.pop()
+
+        # 构建作者字符串：保留 "作者｜"、"编辑｜" 格式，用 "、" 分隔
+        author_str = "、".join(author_parts) if author_parts else ""
+
         return {
             "source_key": "techflow",
             "article_id_full": f"techflow:{item['article_id']}",
             "article_id": item["article_id"],
             "raw_id": item["article_id"],
             "title": title,
-            "author": "",
+            "author": author_str,
             "source": item["source"],
             "publish_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "original_url": item["original_url"],

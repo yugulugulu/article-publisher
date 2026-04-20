@@ -141,8 +141,23 @@ class Publisher:
             else:
                 parts.append(f"<{tag}>{self.html_escape(text)}</{tag}>")
 
-        # Rule 2: Append source info at the end
-        parts.append(f"<p><strong>来源：</strong>{self.html_escape(article['source'] or '')}</p>")
+        # Rule 2: Append author, editor, and source info at the end
+        author = article.get("author", "").strip()
+        source = article.get("source", "").strip()
+
+        # 如果作者信息包含 "作者｜"、"编辑｜" 等格式，直接显示
+        # 否则，只有单纯的作者名时添加 "作者：" 前缀
+        if author:
+            if "｜" in author or "、" in author:
+                # 已经包含标签或分隔符，直接显示
+                parts.append(f"<p><strong>{self.html_escape(author)}</strong></p>")
+            else:
+                # 纯作者名，添加前缀
+                parts.append(f"<p><strong>作者：{self.html_escape(author)}</strong></p>")
+
+        if source:
+            parts.append(f"<p><strong>来源：{self.html_escape(source)}</strong></p>")
+
         return "".join(parts)
 
     def _upload_image_to_cos(self, image_url):
