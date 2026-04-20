@@ -16,30 +16,60 @@ class FilterService:
     """Apply configurable title/content rules before scoring and publishing."""
 
     DEFAULT_RULES = [
-        {"pattern": "早报", "match_type": "keyword", "field": "title", "action": "block", "source_key": "blockbeats", "notes": "过滤律动早报"},
-        {"pattern": "加密早报", "match_type": "keyword", "field": "title", "action": "block", "source_key": "techflow", "notes": "过滤深潮早报"},
-        {"pattern": "Space", "match_type": "keyword", "field": "title", "action": "block", "source_key": "techflow", "notes": "过滤 Space 回顾"},
-        {"pattern": "Bitget", "match_type": "keyword", "field": "title", "action": "block", "source_key": "chaincatcher", "notes": "过滤链捕手 Bitget 内容"},
-        {"pattern": "BYDFi", "match_type": "keyword", "field": "title", "action": "block", "notes": "过滤交易所品牌稿"},
-        {"pattern": "赞助", "match_type": "keyword", "field": "title", "action": "block", "notes": "过滤赞助稿"},
-        {"pattern": "广告", "match_type": "keyword", "field": "title", "action": "block", "notes": "过滤广告稿"},
-        {"pattern": "欢迎加入深潮 TechFlow官方社群", "match_type": "keyword", "field": "content", "action": "tail_cut", "source_key": "techflow"},
-        {"pattern": "Telegram订阅群", "match_type": "keyword", "field": "content", "action": "tail_cut"},
-        {"pattern": "Twitter官方账号", "match_type": "keyword", "field": "content", "action": "tail_cut"},
-        {"pattern": "欢迎加入律动 BlockBeats 官方社群", "match_type": "keyword", "field": "content", "action": "tail_cut", "source_key": "blockbeats"},
-        {"pattern": "点击了解律动 BlockBeats 在招岗位", "match_type": "keyword", "field": "content", "action": "tail_cut", "source_key": "blockbeats"},
+        {"pattern": "新闻早报", "match_type": "keyword", "field": "title", "action": "block", "source_key": "blockbeats", "notes": "过滤律动新闻早报"},
+        {"pattern": "交易日报", "match_type": "keyword", "field": "title", "action": "block", "source_key": "blockbeats", "notes": "过滤律动交易日报"},
+        {"pattern": "Bitget", "match_type": "keyword", "field": "title", "action": "block", "source_key": "blockbeats", "notes": "过滤律动 Bitget 稿件"},
+        {"pattern": "space", "match_type": "keyword", "field": "title", "action": "block", "source_key": "techflow", "notes": "过滤深潮 Space 稿件"},
+        {"pattern": "croo", "match_type": "keyword", "field": "title", "action": "block", "source_key": "techflow", "notes": "过滤深潮 croo 稿件"},
+        {"pattern": "bydfi", "match_type": "keyword", "field": "title", "action": "block", "source_key": "techflow", "notes": "过滤深潮 BYDFi 稿件"},
+        {"pattern": "赞助商", "match_type": "keyword", "field": "title", "action": "block", "source_key": "techflow", "notes": "过滤深潮赞助稿"},
+        {"pattern": "bitget", "match_type": "keyword", "field": "title", "action": "block", "source_key": "chaincatcher", "notes": "过滤链捕手 Bitget 稿件"},
+        {"pattern": "oglabs", "match_type": "keyword", "field": "title", "action": "block", "source_key": "chaincatcher", "notes": "过滤链捕手 Oglabs 稿件"},
+        {"pattern": "social graph ventures", "match_type": "keyword", "field": "title", "action": "block", "source_key": "chaincatcher", "notes": "过滤链捕手 Social Graph Ventures 稿件"},
+        {"pattern": "croo", "match_type": "keyword", "field": "title", "action": "block", "source_key": "chaincatcher", "notes": "过滤链捕手 croo 稿件"},
+        {"pattern": "uxuy", "match_type": "keyword", "field": "title", "action": "block", "source_key": "chaincatcher", "notes": "过滤链捕手 UXUY 稿件"},
+        {"pattern": "deagentai", "match_type": "keyword", "field": "title", "action": "block", "source_key": "chaincatcher", "notes": "过滤链捕手 DeAgentAI 稿件"},
+        {"pattern": "欢迎加入深潮 TechFlow官方社群", "match_type": "keyword", "field": "content", "action": "tail_cut", "source_key": "techflow", "notes": "裁剪深潮文末社群引导"},
+        {"pattern": "Telegram订阅群", "match_type": "keyword", "field": "content", "action": "tail_cut", "notes": "裁剪文末 Telegram 引导"},
+        {"pattern": "Twitter官方账号", "match_type": "keyword", "field": "content", "action": "tail_cut", "notes": "裁剪文末 Twitter 引导"},
+        {"pattern": "欢迎加入律动 BlockBeats 官方社群", "match_type": "keyword", "field": "content", "action": "tail_cut", "source_key": "blockbeats", "notes": "裁剪律动文末社群引导"},
+        {"pattern": "点击了解律动BlockBeats 在招岗位", "match_type": "keyword", "field": "content", "action": "tail_cut", "source_key": "blockbeats", "notes": "裁剪律动招聘尾注"},
+        {"pattern": "点击了解律动 BlockBeats 在招岗位", "match_type": "keyword", "field": "content", "action": "tail_cut", "source_key": "blockbeats", "notes": "裁剪律动招聘尾注"},
     ]
+
+    LEGACY_DISABLE_RULES = [
+        {"pattern": "JST", "field": "title", "action": "block"},
+        {"pattern": "情报局", "field": "title", "action": "block"},
+    ]
+
+    AUTO_PUBLISH_EXCLUDES = {
+        "techflow": ["情报局", "市场综述"],
+    }
 
     def __init__(self, database: ArticleDatabase):
         self.database = database
 
     def ensure_default_rules(self):
-        """Seed a useful starter blocklist for fresh installs."""
-        if self.database.list_blocklist_rules():
-            return
+        """Ensure baseline blocklist rules exist without overwriting user toggles."""
+        existing_rules = self.database.list_blocklist_rules(active_only=False)
+        disabled_count = self._disable_legacy_rules(existing_rules)
+
+        if disabled_count:
+            existing_rules = self.database.list_blocklist_rules(active_only=False)
+
+        created = 0
         for rule in self.DEFAULT_RULES:
+            if self._rule_exists(existing_rules, rule):
+                continue
             self.database.create_blocklist_rule(rule)
-        log.info("FilterService: seeded %d default blocklist rules", len(self.DEFAULT_RULES))
+            created += 1
+
+        if created or disabled_count:
+            log.info(
+                "FilterService: synchronized rules (created=%d, disabled=%d)",
+                created,
+                disabled_count,
+            )
 
     def get_active_rules(self) -> list[dict]:
         self.ensure_default_rules()
@@ -52,9 +82,7 @@ class FilterService:
         if not text:
             return ""
 
-        # Remove source suffixes often appended to titles.
-        text = re.sub(r"\s*[-|｜]\s*(chaincatcher|blockbeats|techflow).*?$", "", text, flags=re.I)
-        # Keep Chinese, letters and digits only.
+        text = re.sub(r"\s*[-|丨]\s*(chaincatcher|blockbeats|techflow).*?$", "", text, flags=re.I)
         text = re.sub(r"[^\w\u4e00-\u9fff]+", "", text)
         return text
 
@@ -75,6 +103,17 @@ class FilterService:
                     "rule": rule,
                 }
         return None
+
+    def should_exclude_from_auto_publish(self, source_key: str, title: str) -> tuple[bool, str]:
+        """Return whether a title is allowed into the auto-publish lane."""
+        text = (title or "").strip()
+        if not text:
+            return False, ""
+
+        for keyword in self.AUTO_PUBLISH_EXCLUDES.get(source_key, []):
+            if keyword.lower() in text.lower():
+                return True, keyword
+        return False, ""
 
     def check_duplicate(
         self,
@@ -235,6 +274,45 @@ class FilterService:
             remaining.extend(block for _, block in move_to_end)
         return remaining
 
+    def _disable_legacy_rules(self, existing_rules: list[dict]) -> int:
+        disabled = 0
+        for legacy in self.LEGACY_DISABLE_RULES:
+            for rule in existing_rules:
+                if not self._rule_matches_exact(rule, legacy):
+                    continue
+                if not rule.get("is_active"):
+                    continue
+                notes = self._append_note(rule.get("notes", ""), "按最新业务规则自动停用")
+                ok = self.database.update_blocklist_rule(
+                    int(rule["id"]),
+                    {"is_active": False, "notes": notes},
+                )
+                if ok:
+                    disabled += 1
+        return disabled
+
+    @staticmethod
+    def _append_note(notes: str, suffix: str) -> str:
+        base = (notes or "").strip()
+        if suffix in base:
+            return base
+        if not base:
+            return suffix
+        return f"{base}；{suffix}"
+
+    def _rule_exists(self, existing_rules: list[dict], target: dict) -> bool:
+        return any(self._rule_matches_exact(rule, target) for rule in existing_rules)
+
+    @staticmethod
+    def _rule_matches_exact(rule: dict, target: dict) -> bool:
+        return (
+            (rule.get("pattern") or "").strip().lower() == (target.get("pattern") or "").strip().lower()
+            and (rule.get("match_type") or "keyword") == (target.get("match_type") or "keyword")
+            and (rule.get("field") or "title") == (target.get("field") or "title")
+            and (rule.get("action") or "block") == (target.get("action") or "block")
+            and (rule.get("source_key") or None) == (target.get("source_key") or None)
+        )
+
     @staticmethod
     def _is_pull_quote(text: str) -> bool:
         normalized = (text or "").strip()
@@ -259,16 +337,16 @@ class FilterService:
             return False
         if len(normalized) < 8 or len(normalized) > 28:
             return False
-        if not re.search(r"[。！？?!]$", normalized):
+        if not re.search(r"[。！？，?!]$", normalized):
             return False
         if FilterService._is_attribution_line(normalized):
             return False
-        if re.search(r"[:：]|https?://|www\.", normalized):
+        if re.search(r"[:：|https?://|www\.]", normalized):
             return False
         if re.search(r"\d", normalized):
             return False
         if re.match(
-            r"^(?:过去|目前|今日|今天|近日|近期|首先|随着|根据|由于|自|从|在|当|对于|如果|今年|本周)",
+            r"^(?:过去|目前|今日|今天|近日|近期|首先|随着|根据|由于|自从|从|在|对于|如果|今年|本周)",
             normalized,
         ):
             return False

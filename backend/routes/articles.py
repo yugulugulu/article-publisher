@@ -100,6 +100,24 @@ def _list_auto_candidate_articles(request: Request, page: int, page_size: int, s
         }
 
     context = scheduler.get_window_context()
+    if not context["active"]:
+        return {
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+            "articles": [],
+            "auto_candidate_window": {
+                "active": False,
+                "window_start": context["window_start"].isoformat(),
+                "window_end": context["window_end"].isoformat(),
+                "min_score": context["min_score"],
+                "auto_sources": context["auto_sources"],
+                "is_morning": context["is_morning"],
+                "window_full": False,
+                "pushed_in_window": 0,
+            },
+        }
+
     pushed_in_window = svc.database.count_pushes_in_window(context["window_start"], strategy="auto")
     if pushed_in_window > 0:
         return {
@@ -108,6 +126,7 @@ def _list_auto_candidate_articles(request: Request, page: int, page_size: int, s
             "page_size": page_size,
             "articles": [],
             "auto_candidate_window": {
+                "active": True,
                 "window_start": context["window_start"].isoformat(),
                 "window_end": context["window_end"].isoformat(),
                 "min_score": context["min_score"],
@@ -143,6 +162,7 @@ def _list_auto_candidate_articles(request: Request, page: int, page_size: int, s
         "page_size": page_size,
         "articles": result,
         "auto_candidate_window": {
+            "active": True,
             "window_start": context["window_start"].isoformat(),
             "window_end": context["window_end"].isoformat(),
             "min_score": context["min_score"],

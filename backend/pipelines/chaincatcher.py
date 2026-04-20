@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
@@ -17,7 +18,7 @@ ARTICLE_SOURCE_NAME = "链捕手 ChainCatcher"
 
 
 class ChainCatcherScraper(BaseScraper):
-    """Scraper for ChainCatcher (链捕手) articles. URL-only, no listing page."""
+    """Scraper for ChainCatcher (链捕手) articles."""
 
     source_key = "chaincatcher"
 
@@ -35,28 +36,45 @@ class ChainCatcherScraper(BaseScraper):
     # -- List parsing --
 
     def parse_list(self) -> list[dict]:
-        """Parse article list from https://www.chaincatcher.com/article
-
-        ChainCatcher is a Nuxt.js SPA, article IDs are embedded in HTML.
-        Pattern: "/article/2255956"
-        """
-        list_url = "https://www.chaincatcher.com/article"
+        """Parse the article list page and return ids with visible titles."""
+        list_url = self.cfg.get("list_url", "https://www.chaincatcher.com/article")
         html = self.fetch_html(list_url)
-
-        # Extract article IDs using regex: "/article/1234567"
-        article_ids = re.findall(r'"/article/(\d{7})"', html)
+        soup = BeautifulSoup(html, "html.parser")
 
         items = []
         seen = set()
-        for aid in article_ids:
+        for anchor in soup.select('a[href*="/article/"]'):
+            href = (anchor.get("href") or "").strip()
+            match = re.search(r"/article/(\d+)", href)
+            if not match:
+                continue
+            aid = match.group(1)
             if aid in seen:
+                continue
+            title_el = anchor.select_one(".article_title_span") or anchor.find("h3") or anchor
+            title = re.sub(r"\s+", " ", title_el.get_text(" ", strip=True)).strip()
+            if not title:
                 continue
             seen.add(aid)
             items.append({
                 "article_id": aid,
-                "original_url": f"https://www.chaincatcher.com/article/{aid}",
+                "title": title[:160],
+                "original_url": urljoin(list_url, href),
                 "source": ARTICLE_SOURCE_NAME,
             })
+
+        if not items:
+            article_ids = re.findall(r'"/article/(\d{7})"', html)
+            for aid in article_ids:
+                if aid in seen:
+                    continue
+                seen.add(aid)
+                items.append({
+                    "article_id": aid,
+                    "title": "",
+                    "original_url": f"https://www.chaincatcher.com/article/{aid}",
+                    "source": ARTICLE_SOURCE_NAME,
+                })
 
         log.info("ChainCatcher found %d articles", len(items))
         return items

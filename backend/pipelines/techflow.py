@@ -22,7 +22,8 @@ class TechFlowScraper(BaseScraper):
 
     def __init__(self, cfg: dict, session, output_dir: Path, db=None):
         super().__init__(cfg, session, output_dir, db)
-        self.excluded_keywords = ["加密早报", "Bitget", "HashKey", "Pharos", "火币", "Deepcoin"]
+        # Local fallback for standalone scraping; the canonical rules live in FilterService.
+        self.excluded_keywords = ["space", "croo", "bydfi", "赞助商"]
 
     def _article_id_from_path(self, path: Path) -> str | None:
         """Extract article_id from TechFlow JSON file path."""
@@ -52,14 +53,15 @@ class TechFlowScraper(BaseScraper):
             article_id = m.group(1)
             if article_id in seen:
                 continue
+            title_el = a.find("h3")
+            title = re.sub(r"\s+", " ", title_el.get_text(" ", strip=True) if title_el else "").strip()
+            if not title:
+                title = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()
+            if not title:
+                continue
+            if any(kw in title.lower() for kw in self.excluded_keywords):
+                continue
             seen.add(article_id)
-            text = a.get_text(" ", strip=True)
-            if not text:
-                continue
-            title = re.sub(r"^\d{4}\.\d{2}\.\d{2}(?:-\s*\d+小时前)?", "", text).strip()
-            title = re.sub(r"^(原创)?", "", title).strip()
-            if any(kw in title for kw in self.excluded_keywords):
-                continue
             items.append({"article_id": article_id, "title": title[:120], "original_url": full_url, "source": "深潮 TechFlow"})
         log.info("TechFlow list: found %d articles", len(items))
         return items

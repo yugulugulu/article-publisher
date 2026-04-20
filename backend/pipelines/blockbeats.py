@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
@@ -43,28 +44,48 @@ class BlockBeatsScraper(BaseScraper):
     # -- List parsing (from article_choice page __NUXT__ data) --
 
     def parse_list(self) -> list[dict]:
-        """Fetch article_choice page and extract article IDs from __NUXT__ data."""
+        """Fetch article_choice page and extract article IDs plus list titles."""
         list_url = self.cfg.get("list_url", "https://www.theblockbeats.info/article_choice")
         html = self.fetch_html(list_url)
-
-        # Extract article_id values from __NUXT__ embedded JSON
-        # The NUXT data uses a compressed format, but article_id always appears
-        # as a literal number: article_id:61768
-        ids = re.findall(r'article_id:(\d+)', html)
+        soup = BeautifulSoup(html, "html.parser")
         seen = set()
         items = []
-        for aid in ids:
+        for anchor in soup.select('a[href*="/news/"]'):
+            href = (anchor.get("href") or "").strip()
+            match = re.search(r"/news/(\d+)", href)
+            if not match:
+                continue
+            aid = match.group(1)
             if aid in seen:
+                continue
+            title = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True)).strip()
+            if not title:
                 continue
             seen.add(aid)
             items.append({
                 "article_id": aid,
                 "article_id_full": f"blockbeats:{aid}",
                 "raw_id": aid,
-                "title": "",
-                "original_url": f"https://www.theblockbeats.info/news/{aid}",
+                "title": title[:160],
+                "original_url": urljoin(list_url, href),
                 "source": ARTICLE_SOURCE_NAME,
             })
+
+        if not items:
+            # Fallback if the DOM structure changes but the embedded ids still exist.
+            ids = re.findall(r'article_id:(\d+)', html)
+            for aid in ids:
+                if aid in seen:
+                    continue
+                seen.add(aid)
+                items.append({
+                    "article_id": aid,
+                    "article_id_full": f"blockbeats:{aid}",
+                    "raw_id": aid,
+                    "title": "",
+                    "original_url": f"https://www.theblockbeats.info/news/{aid}",
+                    "source": ARTICLE_SOURCE_NAME,
+                })
         log.info("BlockBeats article_choice: found %d articles", len(items))
         return items
 

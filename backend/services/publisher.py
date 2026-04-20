@@ -5,12 +5,16 @@ import json
 import logging
 import re
 from datetime import datetime
+from urllib.parse import urlparse
 
 import requests
+from bs4 import BeautifulSoup
 
 from utils.cos import COSUploader
 
 log = logging.getLogger("pipeline")
+
+INTERNAL_JUMP_DOMAINS = ("blockbeats", "odaily", "techflowpost", "foresightnews")
 
 
 class Publisher:
@@ -33,6 +37,55 @@ class Publisher:
         """Remove punctuation and whitespace for fuzzy text comparison."""
         return re.sub(r'[\s，。、；：！？""''（）\[\]【】…—\-,.:;!?()\'\"]+', '', text or '')
 
+    @staticmethod
+    def _is_internal_jump_url(href: str) -> bool:
+        if not href:
+            return False
+        lowered = href.strip().lower()
+        if not lowered:
+            return False
+        parsed = urlparse(lowered)
+        haystack = " ".join(part for part in [parsed.netloc, parsed.path, lowered] if part)
+        return any(domain in haystack for domain in INTERNAL_JUMP_DOMAINS)
+
+    @classmethod
+    def _should_drop_link_block(cls, text: str, href: str) -> bool:
+        if not cls._is_internal_jump_url(href):
+            return False
+        normalized = re.sub(r"\s+", "", (text or "").lower())
+        if not normalized:
+            return True
+        return any(token in normalized for token in ("原文", "原链接", "阅读全文", "阅读原文", "查看原文", "点击查看"))
+
+    @classmethod
+    def _sanitize_inline_html(cls, raw_html: str) -> str:
+        if not raw_html:
+            return ""
+
+        soup = BeautifulSoup(raw_html, "html.parser")
+        for anchor in soup.find_all("a", href=True):
+            href = anchor.get("href", "")
+            text = anchor.get_text(" ", strip=True)
+            if not cls._is_internal_jump_url(href):
+                continue
+            block_parent = anchor.find_parent(["p", "div", "li"])
+            block_text = block_parent.get_text(" ", strip=True) if block_parent else text
+            if cls._should_drop_link_block(block_text or text, href):
+                if block_parent is not None:
+                    block_parent.decompose()
+                else:
+                    anchor.decompose()
+            else:
+                anchor.unwrap()
+
+        for tag in soup.find_all(["p", "div", "span", "h2", "h3", "h4"]):
+            if tag.find("img"):
+                continue
+            if not tag.get_text(" ", strip=True):
+                tag.decompose()
+
+        return "".join(str(node) for node in soup.contents).strip()
+
     def build_html(self, article):
         parts = []
         cover_src = article.get("cover_src", "") or ""
@@ -53,7 +106,7 @@ class Publisher:
                 continue
 
             # Extract text for processing
-            raw = (block.get("html") or "").strip()
+            raw = self._sanitize_inline_html((block.get("html") or "").strip())
             text = (block.get("text") or "").strip()
 
             # Rule 3: Skip first text block if it duplicates the abstract
@@ -78,7 +131,9 @@ class Publisher:
                 continue
             tag = block.get("type", "p") if block.get("type") in ["p", "h2", "h3", "h4"] else "p"
             href = block.get("href", "")
-            if href:
+            if href and self._should_drop_link_block(text, href):
+                continue
+            if href and not self._is_internal_jump_url(href):
                 parts.append(
                     f'<{tag}><a href="{self.html_escape(href)}" '
                     f'target="_blank" rel="noopener">{self.html_escape(text)}</a></{tag}>'

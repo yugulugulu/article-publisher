@@ -314,10 +314,10 @@ class ArticleDatabase:
             return (
                 "CASE WHEN score IS NULL THEN 1 ELSE 0 END ASC, "
                 "score DESC, "
-                "COALESCE(NULLIF(publish_time, ''), created_at) DESC, "
+                "created_at DESC, "
                 "created_at DESC"
             )
-        return "COALESCE(NULLIF(publish_time, ''), created_at) DESC, created_at DESC"
+        return "created_at DESC, COALESCE(NULLIF(publish_time, ''), created_at) DESC"
 
     @staticmethod
     def _normalize_article_payload(article: dict) -> dict:
@@ -1309,7 +1309,7 @@ class ArticleDatabase:
         conn = self._get_conn()
         placeholders = ",".join("?" * len(allowed_sources))
         timestamp_expr = (
-            "datetime(REPLACE(SUBSTR(COALESCE(NULLIF(scored_at, ''), NULLIF(created_at, ''), NULLIF(publish_time, '')), 1, 19), 'T', ' '))"
+            "datetime(REPLACE(SUBSTR(COALESCE(NULLIF(created_at, ''), NULLIF(scored_at, ''), NULLIF(publish_time, '')), 1, 19), 'T', ' '))"
         )
         where_clauses = [
             "COALESCE(publish_stage, 'local') IN ('local', 'draft')",
@@ -1317,7 +1317,7 @@ class ArticleDatabase:
             "score IS NOT NULL",
             "score >= ?",
             f"source_key IN ({placeholders})",
-            "NOT EXISTS (SELECT 1 FROM push_history ph WHERE ph.article_id = articles.article_id AND ph.strategy = 'auto')",
+            "NOT EXISTS (SELECT 1 FROM push_history ph WHERE ph.article_id = articles.article_id AND ph.strategy IN ('auto', 'auto_skip'))",
             "NOT EXISTS (SELECT 1 FROM broadcast_history bh WHERE bh.article_id = articles.article_id)",
         ]
         params: list[Any] = [min_score, *allowed_sources]
@@ -1437,6 +1437,9 @@ class ArticleDatabase:
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict:
         """Convert an SQLite row into a plain article dict."""
+        display_time = ArticleDatabase._format_display_time(
+            row["created_at"] if "created_at" in row.keys() else row["publish_time"]
+        )
         article = {
             "id": row["id"],
             "article_id": row["article_id"],
@@ -1445,7 +1448,8 @@ class ArticleDatabase:
             "title": row["title"],
             "source": row["source"],
             "author": row["author"],
-            "publish_time": row["publish_time"],
+            "publish_time": display_time,
+            "source_publish_time": row["publish_time"],
             "original_url": row["original_url"],
             "cover_src": row["cover_src"],
             "abstract": row["abstract"],
@@ -1495,6 +1499,20 @@ class ArticleDatabase:
             if b.get("type") != "img" and b.get("text")
         ]
         return " ".join(" ".join(texts).split())[:180]
+
+    @staticmethod
+    def _format_display_time(value: str | None) -> str:
+        """Normalize timestamps shown in the UI to minute precision."""
+        if not value:
+            return ""
+        raw = str(value).strip()
+        for parser in (datetime.fromisoformat,):
+            try:
+                parsed = parser(raw.replace("Z", "+00:00"))
+                return parsed.strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                continue
+        return raw[:16] if len(raw) >= 16 else raw
 
     # ------------------------------------------------------------------
     # User operations
