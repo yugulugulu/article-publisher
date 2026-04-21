@@ -68,8 +68,6 @@ class AutoPublishScheduler:
             min_score=context["min_score"],
             limit=max(10, max_per_window * 10),
             source_keys=auto_sources,
-            window_start=window_start,
-            window_end=window_end,
         )
         if not candidates:
             return {"ok": True, "reason": "no_candidates"}
@@ -121,12 +119,8 @@ class AutoPublishScheduler:
                 }
             except Exception as exc:
                 log.error("AutoPublishScheduler failed for %s: %s", chosen.get("article_id", ""), exc)
-                return {
-                    "ok": False,
-                    "reason": "publish_failed",
-                    "article_id": chosen.get("article_id", ""),
-                    "error": str(exc),
-                }
+                # Don't give up — try the next candidate
+                continue
 
         return {"ok": True, "reason": "no_eligible_candidates"}
 
