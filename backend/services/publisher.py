@@ -145,14 +145,12 @@ class Publisher:
         author = article.get("author", "").strip()
         source = article.get("source", "").strip()
 
-        # 如果作者信息包含 "作者｜"、"编辑｜" 等格式，直接显示
+        # 如果作者信息已包含标签（"作者｜"、"作者："、"编辑｜"、"编辑："），直接显示
         # 否则，只有单纯的作者名时添加 "作者：" 前缀
         if author:
-            if "｜" in author or "、" in author:
-                # 已经包含标签或分隔符，直接显示
+            if any(author.startswith(p) for p in ("作者", "编辑")) or "｜" in author or "、" in author:
                 parts.append(f"<p><strong>{self.html_escape(author)}</strong></p>")
             else:
-                # 纯作者名，添加前缀
                 parts.append(f"<p><strong>作者：{self.html_escape(author)}</strong></p>")
 
         if source:

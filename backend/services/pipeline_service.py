@@ -318,12 +318,27 @@ class PipelineService:
         return f"{source_key}:{raw}" if raw else raw
 
     def _store_and_score_article(self, article: dict):
-        """Persist article, generate abstract, score it and assign a review lane."""
+        """Persist article, generate abstract, score it and assign a review lane.
+
+        Articles matching AUTO_PUBLISH_EXCLUDES are saved to DB but skip
+        abstract generation, scoring, and draft saving to save resources.
+        """
         if not self.database:
             return
 
         article["article_id"] = self._canonical_article_id(article.get("source_key", ""), article)
         self.database.insert_or_update(article)
+
+        # Skip LLM / scoring / drafting for articles excluded from auto-publish
+        # (e.g. "市场综述", "情报局") — they just sit in the DB for manual review.
+        if self.filter_service:
+            excluded, keyword = self.filter_service.should_exclude_from_auto_publish(
+                article.get("source_key", ""),
+                article.get("title", ""),
+            )
+            if excluded:
+                log.info("Skip scoring for %s: auto-publish excluded by %s", article["article_id"], keyword)
+                return
 
         from services.llm import generate_abstract
 
@@ -346,11 +361,11 @@ class PipelineService:
             article_category=score_result.get("article_category"),
         )
 
-        # Auto-save CMS draft for scores 70-74 (articles that won't be auto-published)
-        # Articles with score >= 75 will be handled by the auto-publish scheduler directly
-        # and should NOT be saved as draft to avoid duplicate articles when published
+        # Auto-save CMS draft for all articles scoring >= 70
+        # Auto-publish scheduler will upgrade drafts to published when it picks them up,
+        # using the existing cms_id so no duplicate is created.
         score = score_result["score"]
-        if score is not None and 70 <= score < 75:
+        if score is not None and score >= 70:
             # LLM 优化文章（如果启用）
             enable_llm_optimization = self.database.get_setting("llm_optimization_enabled") == "true"
             enable_author_info = self.database.get_setting("llm_author_info_enabled") == "true"

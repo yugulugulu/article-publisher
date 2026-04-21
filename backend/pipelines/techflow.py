@@ -72,27 +72,44 @@ class TechFlowScraper(BaseScraper):
         """Fetch and parse article detail from TechFlow.
 
         提取规则：
-        1. 跳过 <div class="quote"> 开头引用语
-        2. 提取 style="color: rgb(140, 140, 140)" 的作者/编辑信息
+        1. 跳过 <div class="quote"> 开头引用语，并去重正文中重复出现的引用段
+        2. 提取灰色文字（rgb(140,140,140)）中的作者/编辑信息
         3. 作者/编辑信息放到文章最后，与来源一起显示
         """
         html = self.fetch_html(item["original_url"])
         soup = BeautifulSoup(html, "html.parser")
         article = soup.find("article") or soup.find("main") or soup.body
         title = soup.find("h1").get_text(" ", strip=True) if soup.find("h1") else item["title"]
-        blocks, cover_src = [], ""
-        author_parts = []  # 存储作者、编辑信息的原始格式
 
-        for el in article.find_all(["h2", "h3", "p", "img", "div"]):
-            # 跳过引用语块 <div class="quote">
+        # 封面图在文章头部，不在 art_detail_content 内，需从全文提取
+        cover_src = ""
+        if article:
+            for img in article.find_all("img"):
+                src = img.get("src") or ""
+                if src and src.startswith("http"):
+                    cover_src = src
+                    break
+
+        blocks = []
+        author_parts = []  # 存储作者、编辑信息的原始格式
+        quote_texts = set()  # 收集 <div class="quote"> 的文本，用于去重
+
+        # 优先从 art_detail_content 提取正文，避免海报/分享区域干扰
+        content_area = article.find("div", class_="art_detail_content") if article else None
+        if not content_area:
+            content_area = article
+
+        for el in content_area.find_all(["h2", "h3", "p", "img", "div"]):
+            # 跳过引用语块 <div class="quote">，并记录文本用于去重
             if el.name == "div" and "quote" in (el.get("class") or []):
+                q = el.get_text(" ", strip=True)
+                if q:
+                    quote_texts.add(q)
                 continue
 
             if el.name == "img":
                 src = el.get("src") or ""
                 if src and src.startswith("http"):
-                    if not cover_src:
-                        cover_src = src
                     blocks.append({"type": "img", "src": src, "alt": el.get("alt", "")})
                 continue
 
@@ -117,14 +134,10 @@ class TechFlowScraper(BaseScraper):
                                 is_gray = True
                                 break
 
-                # 如果是灰色文字且包含作者/编辑信息，提取并跳过
+                # 灰色文字统一视为作者/编辑信息，提取并跳过
                 if is_gray and text:
-                    if text.startswith("作者｜"):
-                        author_parts.append(text)
-                        continue
-                    elif text.startswith("编辑｜"):
-                        author_parts.append(text)
-                        continue
+                    author_parts.append(text)
+                    continue
 
             if el.name in ["h2", "h3"]:
                 text = el.get_text(" ", strip=True)
@@ -136,6 +149,9 @@ class TechFlowScraper(BaseScraper):
             elif el.name == "p":
                 text = el.get_text(" ", strip=True)
                 if not text or text in {title, "TechFlow Selected 深潮精选"} or self._is_leadin_text(text):
+                    continue
+                # 去重：跳过与 <div class="quote"> 相同的段落
+                if text in quote_texts:
                     continue
                 if self._is_hook_text(text):
                     break
