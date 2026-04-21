@@ -97,8 +97,10 @@ def semantic_dedup(title: str, recent_titles: list[str], db: ArticleDatabase) ->
 
     titles_list = "\n".join(f"{i+1}. {t}" for i, t in enumerate(recent_titles))
     prompt = (
-        "你是一个新闻去重判断助手。判断以下新标题是否与已有标题列表中的任何一篇语义重复"
-        "（指同一事件、同一话题，不只是关键词相似）。\n\n"
+        "你是一个新闻去重判断助手。判断以下新标题是否与已有标题列表中的任何一篇是"
+        "「同一篇报道的不同来源转载」或「高度雷同的改写」。\n"
+        "注意：只是同一话题/事件但角度、内容不同的文章不算重复，"
+        "不同媒体对同一事件的独立报道也不算重复。\n\n"
         f"已有标题：\n{titles_list}\n\n"
         f"新标题：{title}\n\n"
         "请只回答 JSON：{\"duplicate\": true} 或 {\"duplicate\": false}"
