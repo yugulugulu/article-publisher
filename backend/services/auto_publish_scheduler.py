@@ -129,6 +129,8 @@ class AutoPublishScheduler:
                     source_key,
                     broadcast_enabled,
                 )
+                # Clean up stale candidates (scored before current window)
+                self._cleanup_stale_candidates(chosen["article_id"], window_start)
                 return {
                     "ok": True,
                     "reason": "published_and_broadcasted" if broadcast_enabled else "published",
@@ -150,10 +152,8 @@ class AutoPublishScheduler:
         interval = self._get_int_setting("push_check_interval_minutes", 10)
         window_hours = self._get_int_setting("push_window_hours", 2)
         history = []
-        broadcast_history = []
         if self.database:
             history = self.database.list_push_history(limit=8)
-            broadcast_history = self.database.list_broadcast_history(limit=8)
         return {
             "enabled": enabled,
             "window_hours": window_hours,
@@ -166,7 +166,18 @@ class AutoPublishScheduler:
             "check_interval_minutes": interval,
             "auto_sources": sorted(self._get_auto_sources()),
             "history": history,
-            "broadcast_history": broadcast_history,
+        }
+
+    def get_broadcast_status(self) -> dict:
+        """Return broadcast config and recent history (replaces BroadcastScheduler.get_status)."""
+        history = []
+        if self.database:
+            history = self.database.list_broadcast_history(limit=8)
+        return {
+            "enabled": self._is_broadcast_enabled(),
+            "grace_minutes": self._get_int_setting("broadcast_grace_minutes", 15),
+            "check_interval_minutes": self._get_int_setting("broadcast_check_interval_minutes", 15),
+            "history": history,
         }
 
     def _loop(self):
@@ -248,6 +259,17 @@ class AutoPublishScheduler:
             window_start=window_start,
             strategy=AUTO_SKIP_STRATEGY,
         )
+
+    def _cleanup_stale_candidates(self, published_id: str, window_start: datetime) -> int:
+        """Mark stale candidates (scored before current window) as ineligible.
+
+        After publishing an article, any remaining candidates that were scored
+        before the current window are demoted so they won't clutter future windows.
+        """
+        count = self.database.cleanup_stale_candidates(published_id, window_start)
+        if count > 0:
+            log.info("AutoPublishScheduler cleaned up %d stale candidates (before %s)", count, window_start.isoformat())
+        return count
 
     def _is_auto_publish_excluded(self, article: dict) -> tuple[bool, str]:
         filter_service = getattr(self.pipeline_service, "filter_service", None)

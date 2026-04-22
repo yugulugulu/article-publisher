@@ -71,10 +71,10 @@ async def lifespan(app: FastAPI):
     # NOTE: PushScheduler is legacy — superseded by AutoPublishScheduler (publish + broadcast)
     # if svc.push_scheduler:
     #     svc.push_scheduler.start()
+    # NOTE: BroadcastScheduler is merged into AutoPublishScheduler.
+    # Broadcast happens inline when broadcast_enabled=1 during auto-publish.
     if svc.auto_publish_scheduler:
         svc.auto_publish_scheduler.start()
-    if svc.broadcast_scheduler:
-        svc.broadcast_scheduler.start()
 
     # Set default schedules for sources without saved config (10-20 min)
     # Blockchain sources: 15 min default

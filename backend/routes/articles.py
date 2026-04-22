@@ -86,7 +86,7 @@ def list_articles(
 
 
 def _list_auto_candidate_articles(request: Request, page: int, page_size: int, sort_by: str) -> dict:
-    """List current-window auto-publish candidates, matching scheduler behavior."""
+    """List ALL eligible auto-publish candidates (not limited to current window)."""
     svc = request.app.state.pipeline_service
     scheduler = getattr(svc, "auto_publish_scheduler", None)
 
@@ -102,7 +102,7 @@ def _list_auto_candidate_articles(request: Request, page: int, page_size: int, s
     context = scheduler.get_window_context()
     auto_sources = context["auto_sources"]
 
-    # Build window info for display
+    # Build window info for display (still show current window context)
     window_info = {
         "active": context["active"],
         "window_start": context["window_start"].isoformat(),
@@ -114,27 +114,19 @@ def _list_auto_candidate_articles(request: Request, page: int, page_size: int, s
         "pushed_in_window": 0,
     }
 
-    if not context["active"]:
-        return {
-            "total": 0,
-            "page": page,
-            "page_size": page_size,
-            "articles": [],
-            "auto_candidate_window": window_info,
-        }
+    if context["active"]:
+        window_info["pushed_in_window"] = svc.database.count_pushes_in_window(
+            context["window_start"], strategy="auto"
+        )
+        window_info["window_full"] = window_info["pushed_in_window"] >= scheduler._get_int_setting("push_max_per_window", 1)
 
-    window_info["pushed_in_window"] = svc.database.count_pushes_in_window(
-        context["window_start"], strategy="auto"
-    )
-    window_info["window_full"] = window_info["pushed_in_window"] >= scheduler._get_int_setting("push_max_per_window", 1)
-
-    # Query candidates in current window with min_score=75, matching scheduler
+    # Query ALL eligible candidates (no window time constraint)
     candidates = svc.database.get_auto_publish_broadcast_candidates(
         min_score=75,
         limit=None,
         source_keys=auto_sources,
-        window_start=context["window_start"],
-        window_end=context["window_end"],
+        window_start=None,
+        window_end=None,
         sort_by=sort_by,
     )
 

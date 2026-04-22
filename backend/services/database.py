@@ -823,10 +823,11 @@ class ArticleDatabase:
             "published_articles": _count("COALESCE(publish_stage, 'local') IN ('published', 'broadcasted')"),
             "auto_candidates": _count(
                 "review_status = 'auto_candidate' "
-                "AND COALESCE(publish_stage, 'local') = 'local' "
+                "AND auto_publish_enabled = 1 "
+                "AND COALESCE(publish_stage, 'local') IN ('local', 'draft') "
                 "AND NOT EXISTS ("
                 "SELECT 1 FROM push_history ph "
-                "WHERE ph.article_id = articles.article_id AND ph.strategy = 'auto'"
+                "WHERE ph.article_id = articles.article_id AND ph.strategy IN ('auto', 'auto_skip')"
                 ")"
             ),
             "manual_review": _count("review_status = 'manual_review' AND COALESCE(publish_stage, 'local') NOT IN ('published', 'broadcasted')"),
@@ -926,6 +927,24 @@ class ArticleDatabase:
         conn.commit()
         row = conn.execute("SELECT last_insert_rowid()").fetchone()
         return row[0] if row else 0
+
+    def cleanup_stale_candidates(self, published_id: str, window_start: datetime) -> int:
+        """Mark stale auto-candidates (scored before current window) as ineligible."""
+        conn = self._get_conn()
+        result = conn.execute(
+            """
+            UPDATE articles
+            SET auto_publish_enabled = 0,
+                updated_at = ?
+            WHERE auto_publish_enabled = 1
+              AND review_status = 'auto_candidate'
+              AND article_id != ?
+              AND scored_at IS NOT NULL
+              AND scored_at < ?
+            """,
+            (datetime.now().isoformat(), published_id, window_start.isoformat()),
+        )
+        return result.rowcount
 
     def count_pushes_in_window(self, window_start: datetime, strategy: str = "auto",
                                source_keys: list[str] | None = None) -> int:

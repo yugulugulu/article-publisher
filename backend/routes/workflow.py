@@ -68,11 +68,34 @@ def run_push_check(request: Request, _admin=Depends(require_admin)):
 
 @router.post("/workflow/broadcast-check")
 def run_broadcast_check(request: Request, _admin=Depends(require_admin)):
-    """Trigger a single broadcast-only cycle for already published articles."""
+    """Broadcast all published-but-not-broadcast articles (one-shot, no scheduler thread)."""
     svc = request.app.state.pipeline_service
-    if not svc.broadcast_scheduler:
-        raise HTTPException(501, "Broadcast scheduler not configured")
-    return svc.broadcast_scheduler.run_once()
+    if not svc.database:
+        raise HTTPException(501, "Database not configured")
+
+    if not svc.auto_publish_scheduler._is_broadcast_enabled():
+        return {"ok": True, "reason": "broadcast_disabled"}
+
+    grace_minutes = svc.auto_publish_scheduler._get_int_setting("broadcast_grace_minutes", 15)
+    candidates = svc.database.get_auto_broadcast_candidates(
+        grace_minutes=grace_minutes,
+        limit=20,
+    )
+    if not candidates:
+        return {"ok": True, "reason": "no_candidates", "count": 0}
+
+    broadcasted = []
+    for chosen in candidates:
+        if svc.database.has_broadcast_history(chosen["article_id"]):
+            continue
+        try:
+            svc.broadcast_article(chosen, strategy="manual")
+            broadcasted.append(chosen["article_id"])
+            log.info("Manual broadcast catch-up: %s (cms_id=%s)", chosen["article_id"], chosen.get("cms_id"))
+        except Exception as exc:
+            log.error("Manual broadcast failed for %s: %s", chosen.get("article_id", ""), exc)
+
+    return {"ok": True, "reason": "broadcasted", "count": len(broadcasted), "articles": broadcasted}
 
 
 @router.post("/workflow/rescore-unscored")

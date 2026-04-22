@@ -18,7 +18,6 @@ from services.article_store import ArticleStore
 from services.filter_service import FilterService
 from services.publisher import Publisher
 from services.push_scheduler import PushScheduler
-from services.broadcast_scheduler import BroadcastScheduler
 from services.auto_publish_scheduler import AutoPublishScheduler
 from services.scorer import ScorerService
 from utils.cos import COSUploader
@@ -195,7 +194,6 @@ class PipelineService:
         self.filter_service = FilterService(database) if database else None
         self.scorer = ScorerService(database) if database else None
         self.push_scheduler = PushScheduler(self) if database else None
-        self.broadcast_scheduler = BroadcastScheduler(self) if database else None
         self.auto_publish_scheduler = AutoPublishScheduler(self) if database else None
         if self.filter_service:
             self.filter_service.ensure_default_rules()
@@ -417,7 +415,7 @@ class PipelineService:
         return {
             "metrics": self.database.get_source_metrics(self.get_managed_source_keys()),
             "scheduler": self.auto_publish_scheduler.get_status() if self.auto_publish_scheduler else {},
-            "broadcast": self.broadcast_scheduler.get_status() if self.broadcast_scheduler else {},
+            "broadcast": self.auto_publish_scheduler.get_broadcast_status() if self.auto_publish_scheduler else {},
         }
 
     @staticmethod
@@ -1037,8 +1035,6 @@ class PipelineService:
             self.auto_publish_scheduler.stop()
         if self.push_scheduler:
             self.push_scheduler.stop()
-        if self.broadcast_scheduler:
-            self.broadcast_scheduler.stop()
 
     # -- Log reading (memory-efficient: read from end) --
 

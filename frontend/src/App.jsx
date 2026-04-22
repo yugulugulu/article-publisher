@@ -132,7 +132,6 @@ const buildWorkflowSettingsForm = (settingsData = {}) => ({
   })(),
   broadcast_enabled: (settingsData.broadcast_enabled ?? '0') === '1',
   broadcast_grace_minutes: settingsData.broadcast_grace_minutes || '15',
-  broadcast_check_interval_minutes: settingsData.broadcast_check_interval_minutes || '15',
   llm_optimization_enabled: (settingsData.llm_optimization_enabled ?? '0') === '1',
   llm_author_info_enabled: (settingsData.llm_author_info_enabled ?? '0') === '1',
   ai_daily_limit: settingsData.ai_daily_limit || '2',
@@ -148,7 +147,6 @@ const workflowSettingsToPayload = (form) => ({
   push_auto_sources: JSON.stringify(form.push_auto_sources || []),
   broadcast_enabled: form.broadcast_enabled ? '1' : '0',
   broadcast_grace_minutes: String(form.broadcast_grace_minutes || '15'),
-  broadcast_check_interval_minutes: String(form.broadcast_check_interval_minutes || '15'),
   llm_optimization_enabled: form.llm_optimization_enabled ? '1' : '0',
   llm_author_info_enabled: form.llm_author_info_enabled ? '1' : '0',
   ai_daily_limit: String(form.ai_daily_limit || '2'),
@@ -456,7 +454,7 @@ function DashboardPage() {
     try {
       const result = await api.runWorkflowBroadcastCheck()
       if (result.reason === 'broadcasted') {
-        alert(`已推送：${result.article_id} (CMS ${result.cms_id})`)
+        alert(`已推送 ${result.count} 篇文章`)
       } else {
         alert(`检查完成：${result.reason}`)
       }
@@ -689,7 +687,7 @@ function DashboardPage() {
           {!isGuest && (
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <button className="btn btn-outline btn-sm" onClick={handleRunWorkflowBroadcastCheck} disabled={broadcastChecking}>
-                {broadcastChecking ? '检查中...' : '立即检查推送'}
+                {broadcastChecking ? '推送中...' : '补推'}
               </button>
               <button className="btn btn-primary btn-sm" onClick={handleSaveWorkflowSettings} disabled={workflowSaving}>
                 {workflowSaving ? '保存中...' : '保存设置'}
@@ -698,7 +696,7 @@ function DashboardPage() {
           )}
         </div>
         <p className="workflow-subtitle" style={{ marginTop: 0, marginBottom: 16 }}>
-          将已公开发布的文章推送到 App 桌面通知。默认关闭，需手动开启。推送后文章状态变为"全员推送"。
+          开启后，自动发布文章时同时推送到 App 桌面通知。也可点击"补推"按钮手动推送已发布但未推送的文章。
         </p>
         <div className="workflow-grid">
           <div className="settings-group">
@@ -727,20 +725,6 @@ function DashboardPage() {
                 max="120"
                 value={workflowForm.broadcast_grace_minutes}
                 onChange={e => handleWorkflowFieldChange('broadcast_grace_minutes', e.target.value)}
-              />
-            )}
-          </div>
-          <div className="settings-group">
-            <label>检查间隔</label>
-            {isGuest ? (
-              <div className="workflow-inline-value">{workflow.broadcast?.check_interval_minutes ?? 15} 分钟</div>
-            ) : (
-              <input
-                type="number"
-                min="1"
-                max="60"
-                value={workflowForm.broadcast_check_interval_minutes}
-                onChange={e => handleWorkflowFieldChange('broadcast_check_interval_minutes', e.target.value)}
               />
             )}
           </div>
@@ -1929,19 +1913,19 @@ function PromptPage() {
               try {
                 const result = await api.runWorkflowBroadcastCheck()
                 if (result.reason === 'broadcasted') {
-                  alert(`已推送：${result.article_id} (CMS ${result.cms_id})`)
+                  alert(`已补推 ${result.count} 篇文章`)
                 } else {
                   alert(`检查完成：${result.reason}`)
                 }
                 await refreshWorkflow()
               } catch (e) { alert(e.message) }
             }}>
-              立即检查推送
+              补推
             </button>
           )}
         </div>
         <p className="workflow-subtitle" style={{ marginTop: 0, marginBottom: 16 }}>
-          将已公开发布的文章推送到 App 桌面通知。默认关闭。推送后状态变为"全员推送"，不可撤销。
+          开启后，自动发布文章时同时推送到 App 桌面通知。推送后状态变为"全员推送"，不可撤销。
         </p>
         <div className="workflow-grid">
           <div className="settings-group">
@@ -1965,17 +1949,6 @@ function PromptPage() {
               max="120"
               disabled={isGuest}
               onChange={e => setSettingsForm(prev => ({ ...prev, broadcast_grace_minutes: e.target.value }))}
-            />
-          </div>
-          <div className="settings-group">
-            <label>检查间隔（分钟）</label>
-            <input
-              type="number"
-              value={settingsForm.broadcast_check_interval_minutes}
-              min="1"
-              max="60"
-              disabled={isGuest}
-              onChange={e => setSettingsForm(prev => ({ ...prev, broadcast_check_interval_minutes: e.target.value }))}
             />
           </div>
         </div>
