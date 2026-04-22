@@ -86,7 +86,11 @@ def list_articles(
 
 
 def _list_auto_candidate_articles(request: Request, page: int, page_size: int, sort_by: str) -> dict:
-    """List current-window auto-publish candidates for the article page."""
+    """List all eligible auto-publish candidates for the article page.
+
+    Shows ALL unprocessed candidates from auto_sources regardless of the
+    scheduler's current time window, so users can see what's available.
+    """
     svc = request.app.state.pipeline_service
     scheduler = getattr(svc, "auto_publish_scheduler", None)
 
@@ -100,49 +104,31 @@ def _list_auto_candidate_articles(request: Request, page: int, page_size: int, s
         }
 
     context = scheduler.get_window_context()
-    if not context["active"]:
-        return {
-            "total": 0,
-            "page": page,
-            "page_size": page_size,
-            "articles": [],
-            "auto_candidate_window": {
-                "active": False,
-                "window_start": context["window_start"].isoformat(),
-                "window_end": context["window_end"].isoformat(),
-                "min_score": context["min_score"],
-                "auto_sources": context["auto_sources"],
-                "is_morning": context["is_morning"],
-                "window_full": False,
-                "pushed_in_window": 0,
-            },
-        }
+    auto_sources = context["auto_sources"]
 
-    pushed_in_window = svc.database.count_pushes_in_window(context["window_start"], strategy="auto")
-    if pushed_in_window > 0:
-        return {
-            "total": 0,
-            "page": page,
-            "page_size": page_size,
-            "articles": [],
-            "auto_candidate_window": {
-                "active": True,
-                "window_start": context["window_start"].isoformat(),
-                "window_end": context["window_end"].isoformat(),
-                "min_score": context["min_score"],
-                "auto_sources": context["auto_sources"],
-                "is_morning": context["is_morning"],
-                "window_full": True,
-                "pushed_in_window": pushed_in_window,
-            },
-        }
+    # Build window info for display (scheduler context still shown for reference)
+    window_info = {
+        "active": context["active"],
+        "window_start": context["window_start"].isoformat(),
+        "window_end": context["window_end"].isoformat(),
+        "min_score": context["min_score"],
+        "auto_sources": auto_sources,
+        "is_morning": context.get("is_morning", False),
+        "window_full": False,
+        "pushed_in_window": 0,
+    }
 
+    if context["active"]:
+        window_info["pushed_in_window"] = svc.database.count_pushes_in_window(
+            context["window_start"], strategy="auto"
+        )
+        window_info["window_full"] = window_info["pushed_in_window"] >= scheduler._get_int_setting("push_max_per_window", 1)
+
+    # Query all eligible candidates without time window restriction
     candidates = svc.database.get_auto_publish_broadcast_candidates(
-        min_score=context["min_score"],
+        min_score=70,
         limit=None,
-        source_keys=context["auto_sources"],
-        window_start=context["window_start"],
-        window_end=context["window_end"],
+        source_keys=auto_sources,
         sort_by=sort_by,
     )
 
@@ -161,16 +147,7 @@ def _list_auto_candidate_articles(request: Request, page: int, page_size: int, s
         "page": page,
         "page_size": page_size,
         "articles": result,
-        "auto_candidate_window": {
-            "active": True,
-            "window_start": context["window_start"].isoformat(),
-            "window_end": context["window_end"].isoformat(),
-            "min_score": context["min_score"],
-            "auto_sources": context["auto_sources"],
-            "is_morning": context["is_morning"],
-            "window_full": False,
-            "pushed_in_window": pushed_in_window,
-        },
+        "auto_candidate_window": window_info,
     }
 
 
