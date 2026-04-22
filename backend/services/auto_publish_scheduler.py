@@ -164,32 +164,46 @@ class AutoPublishScheduler:
                     continue
 
             push_label = self.pipeline_service.get_push_label(score) or "热文"
+            broadcast_enabled = self._is_broadcast_enabled()
 
             try:
-                result = self.pipeline_service.auto_publish_and_broadcast(
-                    chosen,
-                    push_label=push_label,
-                    window_start=window_start,
-                )
-                cms_id = result.get("cms_id", "")
+                if broadcast_enabled:
+                    result = self.pipeline_service.auto_publish_and_broadcast(
+                        chosen,
+                        push_label=push_label,
+                        window_start=window_start,
+                    )
+                    cms_id = result.get("cms_id", "")
+                else:
+                    result = self.pipeline_service.publish_article(chosen, strategy="auto")
+                    cms_id = result.get("cms_id", "")
+                    self.database.record_push_history(
+                        article_id=chosen["article_id"],
+                        source_key=source_key,
+                        score=score,
+                        cms_id=cms_id,
+                        window_start=window_start,
+                        strategy="auto",
+                    )
 
                 log.info(
-                    "AutoPublishScheduler publish %s (score=%s, cms_id=%s, label=%s, source=%s, fallback=%s)",
+                    "AutoPublishScheduler publish %s (score=%s, cms_id=%s, label=%s, source=%s, broadcast=%s, fallback=%s)",
                     chosen["article_id"],
                     score,
                     cms_id,
                     push_label,
                     source_key,
+                    broadcast_enabled,
                     is_fallback,
                 )
                 self._cleanup_stale_candidates(chosen["article_id"], window_start)
                 return {
                     "ok": True,
-                    "reason": "published_and_broadcasted",
+                    "reason": "published_and_broadcasted" if broadcast_enabled else "published",
                     "article_id": chosen["article_id"],
                     "cms_id": cms_id,
                     "score": score,
-                    "push_label": push_label,
+                    "push_label": push_label if broadcast_enabled else "",
                 }
             except Exception as exc:
                 log.error("AutoPublishScheduler failed for %s: %s", chosen.get("article_id", ""), exc)
@@ -227,7 +241,7 @@ class AutoPublishScheduler:
         if self.database:
             history = self.database.list_broadcast_history(limit=8)
         return {
-            "enabled": True,
+            "enabled": self._is_broadcast_enabled(),
             "grace_minutes": self._get_int_setting("broadcast_grace_minutes", 15),
             "history": history,
         }
@@ -336,6 +350,10 @@ class AutoPublishScheduler:
             except json.JSONDecodeError:
                 pass
         return {item.strip() for item in raw.split(",") if item.strip()}
+
+    def _is_broadcast_enabled(self) -> bool:
+        raw = (self.database.get_setting("broadcast_enabled") or "0").strip().lower()
+        return raw in {"1", "true", "on", "yes"}
 
     @staticmethod
     def _is_morning_window(now: datetime) -> bool:
