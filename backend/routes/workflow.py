@@ -68,13 +68,10 @@ def run_push_check(request: Request, _admin=Depends(require_admin)):
 
 @router.post("/workflow/broadcast-check")
 def run_broadcast_check(request: Request, _admin=Depends(require_admin)):
-    """Broadcast all published-but-not-broadcast articles (one-shot, no scheduler thread)."""
+    """Broadcast all published-but-not-broadcast articles (one-shot catch-up)."""
     svc = request.app.state.pipeline_service
     if not svc.database:
         raise HTTPException(501, "Database not configured")
-
-    if not svc.auto_publish_scheduler._is_broadcast_enabled():
-        return {"ok": True, "reason": "broadcast_disabled"}
 
     grace_minutes = svc.auto_publish_scheduler._get_int_setting("broadcast_grace_minutes", 15)
     candidates = svc.database.get_auto_broadcast_candidates(

@@ -701,18 +701,7 @@ function DashboardPage() {
         <div className="workflow-grid">
           <div className="settings-group">
             <label>自动推送</label>
-            {isGuest ? (
-              <div className="workflow-inline-value">{workflow.broadcast?.enabled ? '已开启' : '已关闭'}</div>
-            ) : (
-              <label className="workflow-toggle">
-                <input
-                  type="checkbox"
-                  checked={workflowForm.broadcast_enabled}
-                  onChange={e => handleWorkflowFieldChange('broadcast_enabled', e.target.checked)}
-                />
-                <span>{workflowForm.broadcast_enabled ? '已开启' : '已关闭'}</span>
-              </label>
-            )}
+            <div className="workflow-inline-value">自动发布时自动推送（已开启）</div>
           </div>
           <div className="settings-group">
             <label>缓冲时间</label>
@@ -1929,16 +1918,8 @@ function PromptPage() {
         </p>
         <div className="workflow-grid">
           <div className="settings-group">
-            <label>启用自动推送</label>
-            <label className="workflow-toggle">
-              <input
-                type="checkbox"
-                checked={settingsForm.broadcast_enabled}
-                onChange={e => setSettingsForm(prev => ({ ...prev, broadcast_enabled: e.target.checked }))}
-                disabled={isGuest}
-              />
-              <span>{settingsForm.broadcast_enabled ? '已开启' : '已关闭'}</span>
-            </label>
+            <label>自动推送</label>
+            <div className="workflow-inline-value">自动发布时自动推送（已开启）</div>
           </div>
           <div className="settings-group">
             <label>缓冲时间（分钟）</label>

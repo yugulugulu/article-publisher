@@ -1,5 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Unified auto-publish + broadcast scheduler."""
+"""Unified auto-publish + app broadcast scheduler.
+
+Rules:
+  - Morning window (8-10): any article scoring >= 75 triggers immediate publish + broadcast.
+  - Other windows (10-22, 2-hour blocks):
+      * Score >= 85 triggers immediate publish + broadcast.
+      * Score 75-84 enters the candidate pool and waits.
+      * Window-end fallback: if no >= 85 article appeared, the highest >= 75
+        candidate is published when the window is about to close.
+  - Before publishing, semantic dedup against the last 6 auto-published articles.
+  - Auto-publish ALWAYS includes App broadcast (push_title="爆文"/"热文").
+"""
 
 from __future__ import annotations
 
@@ -15,6 +26,9 @@ ACTIVE_END = 23
 MORNING_START = 8
 MORNING_END = 10
 AUTO_SKIP_STRATEGY = "auto_skip"
+
+EXPLOSIVE_THRESHOLD = 85  # 爆文
+HOT_THRESHOLD = 75        # 热文
 
 
 class AutoPublishScheduler:
@@ -59,13 +73,53 @@ class AutoPublishScheduler:
         window_start = context["window_start"]
         window_end = context["window_end"]
         auto_sources = context["auto_sources"]
+        is_morning = context["is_morning"]
         max_per_window = self._get_int_setting("push_max_per_window", 1)
+
+        # Check if window already has a publish
         pushed_in_window = self.database.count_pushes_in_window(window_start, strategy="auto")
         if pushed_in_window >= max_per_window:
             return {"ok": True, "reason": "window_full", "window_start": window_start.isoformat()}
 
+        # --- Determine candidates based on window type ---
+        if is_morning:
+            # Morning window: any >= 75 triggers publish
+            min_score = HOT_THRESHOLD
+        else:
+            # Normal window: try >= 85 first
+            high_candidates = self.database.get_auto_publish_broadcast_candidates(
+                min_score=EXPLOSIVE_THRESHOLD,
+                limit=max(10, max_per_window * 10),
+                source_keys=auto_sources,
+                window_start=window_start,
+                window_end=window_end,
+            )
+            if high_candidates:
+                # Found >= 85 article(s) — publish the best one
+                return self._try_publish_candidates(
+                    high_candidates, window_start, auto_sources
+                )
+
+            # No >= 85 candidates. Check if we're near window end for fallback.
+            now = datetime.now()
+            check_interval = self._get_int_setting("push_check_interval_minutes", 10)
+            remaining = (window_end - now).total_seconds() / 60
+
+            if remaining > check_interval:
+                # Still early in the window — wait for potential >= 85 article
+                return {
+                    "ok": True,
+                    "reason": "waiting_for_high_score",
+                    "window_start": window_start.isoformat(),
+                    "remaining_minutes": round(remaining, 1),
+                }
+
+            # Window is closing — fallback to highest >= 75
+            min_score = HOT_THRESHOLD
+
+        # Query candidates with determined min_score
         candidates = self.database.get_auto_publish_broadcast_candidates(
-            min_score=context["min_score"],
+            min_score=min_score,
             limit=max(10, max_per_window * 10),
             source_keys=auto_sources,
             window_start=window_start,
@@ -74,7 +128,21 @@ class AutoPublishScheduler:
         if not candidates:
             return {"ok": True, "reason": "no_candidates"}
 
+        return self._try_publish_candidates(
+            candidates, window_start, auto_sources, is_fallback=not is_morning
+        )
+
+    def _try_publish_candidates(
+        self,
+        candidates: list[dict],
+        window_start: datetime,
+        auto_sources: list[str],
+        *,
+        is_fallback: bool = False,
+    ) -> dict:
+        """Try candidates in order: dedup → exclude → publish + broadcast."""
         recent_titles = self.database.get_recent_auto_publish_broadcast_titles(limit=6)
+
         for chosen in candidates:
             score = chosen.get("score") or 0
             title = chosen.get("title", "")
@@ -95,56 +163,41 @@ class AutoPublishScheduler:
                     self._record_auto_skip(chosen, window_start)
                     continue
 
-            broadcast_enabled = self._is_broadcast_enabled()
             push_label = self.pipeline_service.get_push_label(score) or "热文"
 
             try:
-                if broadcast_enabled:
-                    result = self.pipeline_service.auto_publish_and_broadcast(
-                        chosen,
-                        push_label=push_label,
-                        window_start=window_start,
-                    )
-                    cms_id = result.get("cms_id", "")
-                else:
-                    # Only publish to CMS, skip app broadcast
-                    result = self.pipeline_service.publish_article(chosen, strategy="auto")
-                    cms_id = result.get("cms_id", "")
-                    # Record in push_history for window dedup tracking
-                    self.database.record_push_history(
-                        article_id=chosen["article_id"],
-                        source_key=source_key,
-                        score=score,
-                        cms_id=cms_id,
-                        window_start=window_start,
-                        strategy="auto",
-                    )
+                result = self.pipeline_service.auto_publish_and_broadcast(
+                    chosen,
+                    push_label=push_label,
+                    window_start=window_start,
+                )
+                cms_id = result.get("cms_id", "")
 
                 log.info(
-                    "AutoPublishScheduler publish %s (score=%s, cms_id=%s, label=%s, source=%s, broadcast=%s)",
+                    "AutoPublishScheduler publish %s (score=%s, cms_id=%s, label=%s, source=%s, fallback=%s)",
                     chosen["article_id"],
                     score,
                     cms_id,
                     push_label,
                     source_key,
-                    broadcast_enabled,
+                    is_fallback,
                 )
-                # Clean up stale candidates (scored before current window)
                 self._cleanup_stale_candidates(chosen["article_id"], window_start)
                 return {
                     "ok": True,
-                    "reason": "published_and_broadcasted" if broadcast_enabled else "published",
+                    "reason": "published_and_broadcasted",
                     "article_id": chosen["article_id"],
                     "cms_id": cms_id,
                     "score": score,
-                    "push_label": push_label if broadcast_enabled else "",
+                    "push_label": push_label,
                 }
             except Exception as exc:
                 log.error("AutoPublishScheduler failed for %s: %s", chosen.get("article_id", ""), exc)
-                # Don't give up — try the next candidate
                 continue
 
         return {"ok": True, "reason": "no_eligible_candidates"}
+
+    # -- Status helpers --
 
     def get_status(self) -> dict:
         """Return scheduler config and recent history."""
@@ -159,8 +212,8 @@ class AutoPublishScheduler:
             "window_hours": window_hours,
             "active_hours": {"start_hour": ACTIVE_START, "end_hour": ACTIVE_END},
             "morning_window": {"start_hour": MORNING_START, "end_hour": MORNING_END},
-            "hot_score": 75,
-            "auto_score": self._get_int_setting("push_auto_score", 85),
+            "hot_score": HOT_THRESHOLD,
+            "explosive_score": EXPLOSIVE_THRESHOLD,
             "review_score": self._get_int_setting("push_review_score", 70),
             "max_per_window": self._get_int_setting("push_max_per_window", 1),
             "check_interval_minutes": interval,
@@ -169,27 +222,17 @@ class AutoPublishScheduler:
         }
 
     def get_broadcast_status(self) -> dict:
-        """Return broadcast config and recent history (replaces BroadcastScheduler.get_status)."""
+        """Return broadcast config and recent history."""
         history = []
         if self.database:
             history = self.database.list_broadcast_history(limit=8)
         return {
-            "enabled": self._is_broadcast_enabled(),
+            "enabled": True,
             "grace_minutes": self._get_int_setting("broadcast_grace_minutes", 15),
-            "check_interval_minutes": self._get_int_setting("broadcast_check_interval_minutes", 15),
             "history": history,
         }
 
-    def _loop(self):
-        while not self._stop_event.is_set():
-            interval_minutes = self._get_int_setting("push_check_interval_minutes", 10)
-            self._stop_event.wait(max(1, interval_minutes) * 60)
-            if self._stop_event.is_set():
-                break
-            try:
-                self.run_once()
-            except Exception as exc:
-                log.error("AutoPublishScheduler loop failed: %s", exc)
+    # -- Window helpers --
 
     def get_window_context(self, now: datetime | None = None) -> dict:
         """Return the currently active publish window context."""
@@ -203,7 +246,7 @@ class AutoPublishScheduler:
                 "is_morning": True,
                 "window_start": next_window_start,
                 "window_end": next_window_end,
-                "min_score": 75,
+                "min_score": HOT_THRESHOLD,
                 "auto_sources": sorted(self._get_auto_sources()),
             }
 
@@ -216,12 +259,11 @@ class AutoPublishScheduler:
             "is_morning": is_morning,
             "window_start": window_start,
             "window_end": window_end,
-            "min_score": self._get_int_setting("push_auto_score", 75),
+            "min_score": HOT_THRESHOLD if is_morning else EXPLOSIVE_THRESHOLD,
             "auto_sources": sorted(self._get_auto_sources()),
         }
 
     def _window_start(self, now: datetime) -> datetime:
-        """Return the aligned window start for the current moment."""
         if self._is_morning_window(now):
             return now.replace(hour=MORNING_START, minute=0, second=0, microsecond=0)
         window_hours = max(1, self._get_int_setting("push_window_hours", 2))
@@ -229,26 +271,25 @@ class AutoPublishScheduler:
         return now.replace(hour=base_hour, minute=0, second=0, microsecond=0)
 
     def _window_end(self, window_start: datetime) -> datetime:
-        """Return the exclusive end boundary for the active publish window."""
         window_hours = max(1, self._get_int_setting("push_window_hours", 2))
         proposed = window_start + timedelta(hours=window_hours)
         day_end = window_start.replace(hour=ACTIVE_END, minute=0, second=0, microsecond=0)
         return proposed if proposed <= day_end else day_end
 
-    @staticmethod
-    def _is_morning_window(now: datetime) -> bool:
-        return MORNING_START <= now.hour < MORNING_END
+    # -- Loop --
 
-    @staticmethod
-    def _is_active_time(now: datetime) -> bool:
-        return ACTIVE_START <= now.hour < ACTIVE_END
+    def _loop(self):
+        while not self._stop_event.is_set():
+            interval_minutes = self._get_int_setting("push_check_interval_minutes", 10)
+            self._stop_event.wait(max(1, interval_minutes) * 60)
+            if self._stop_event.is_set():
+                break
+            try:
+                self.run_once()
+            except Exception as exc:
+                log.error("AutoPublishScheduler loop failed: %s", exc)
 
-    @staticmethod
-    def _next_active_start(now: datetime) -> datetime:
-        if now.hour < ACTIVE_START:
-            return now.replace(hour=ACTIVE_START, minute=0, second=0, microsecond=0)
-        next_day = now + timedelta(days=1)
-        return next_day.replace(hour=ACTIVE_START, minute=0, second=0, microsecond=0)
+    # -- Utility methods --
 
     def _record_auto_skip(self, article: dict, window_start: datetime) -> None:
         self.database.record_push_history(
@@ -261,11 +302,7 @@ class AutoPublishScheduler:
         )
 
     def _cleanup_stale_candidates(self, published_id: str, window_start: datetime) -> int:
-        """Mark stale candidates (scored before current window) as ineligible.
-
-        After publishing an article, any remaining candidates that were scored
-        before the current window are demoted so they won't clutter future windows.
-        """
+        """Mark stale candidates (scored before current window) as ineligible."""
         count = self.database.cleanup_stale_candidates(published_id, window_start)
         if count > 0:
             log.info("AutoPublishScheduler cleaned up %d stale candidates (before %s)", count, window_start.isoformat())
@@ -300,6 +337,17 @@ class AutoPublishScheduler:
                 pass
         return {item.strip() for item in raw.split(",") if item.strip()}
 
-    def _is_broadcast_enabled(self) -> bool:
-        raw = (self.database.get_setting("broadcast_enabled") or "0").strip().lower()
-        return raw in {"1", "true", "on", "yes"}
+    @staticmethod
+    def _is_morning_window(now: datetime) -> bool:
+        return MORNING_START <= now.hour < MORNING_END
+
+    @staticmethod
+    def _is_active_time(now: datetime) -> bool:
+        return ACTIVE_START <= now.hour < ACTIVE_END
+
+    @staticmethod
+    def _next_active_start(now: datetime) -> datetime:
+        if now.hour < ACTIVE_START:
+            return now.replace(hour=ACTIVE_START, minute=0, second=0, microsecond=0)
+        next_day = now + timedelta(days=1)
+        return next_day.replace(hour=ACTIVE_START, minute=0, second=0, microsecond=0)
