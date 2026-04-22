@@ -361,6 +361,26 @@ class PipelineService:
             article_category=score_result.get("article_category"),
         )
 
+        # Add to publish candidates pool if meets criteria
+        # This isolates new articles from historical ones
+        score = score_result["score"]
+        review_status = score_result.get("review_status", "manual_review")
+        auto_publish_enabled = score_result.get("auto_publish_enabled", False)
+
+        # Add to candidates pool if score >= 70 and not excluded
+        if score is not None and score >= 70 and review_status == "auto_candidate":
+            try:
+                self.database.add_to_publish_candidates(
+                    article_id=article["article_id"],
+                    source_key=article.get("source_key", ""),
+                    score=score,
+                    review_status=review_status,
+                    auto_publish_enabled=auto_publish_enabled,
+                )
+                log.info("Added %s to publish candidates pool (score=%d)", article["article_id"], score)
+            except Exception as exc:
+                log.warning("Failed to add %s to publish candidates: %s", article["article_id"], exc)
+
         # Auto-save CMS draft for all articles scoring >= 70
         # Auto-publish scheduler will upgrade drafts to published when it picks them up,
         # using the existing cms_id so no duplicate is created.
@@ -491,7 +511,7 @@ class PipelineService:
 
         return result
 
-    def auto_publish_and_broadcast(self, article: dict, push_label: str = "") -> dict:
+    def auto_publish_and_broadcast(self, article: dict, push_label: str = "", window_start: datetime | None = None) -> dict:
         """Atomic: publish article to CMS then broadcast to App.
 
         Used by AutoPublishScheduler for the unified publish+push flow.
@@ -550,8 +570,9 @@ class PipelineService:
                 result="ok",
             )
             # Also record in push_history for window dedup
-            now = datetime.now()
-            window_start = self.auto_publish_scheduler._window_start(now) if self.auto_publish_scheduler else now
+            if window_start is None:
+                now = datetime.now()
+                window_start = self.auto_publish_scheduler._window_start(now) if self.auto_publish_scheduler else now
             self.database.record_push_history(
                 article_id=prepared["article_id"],
                 source_key=prepared.get("source_key", ""),

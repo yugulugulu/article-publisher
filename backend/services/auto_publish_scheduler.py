@@ -103,6 +103,7 @@ class AutoPublishScheduler:
                     result = self.pipeline_service.auto_publish_and_broadcast(
                         chosen,
                         push_label=push_label,
+                        window_start=window_start,
                     )
                     cms_id = result.get("cms_id", "")
                 else:
@@ -204,7 +205,7 @@ class AutoPublishScheduler:
             "is_morning": is_morning,
             "window_start": window_start,
             "window_end": window_end,
-            "min_score": 75 if is_morning else 85,
+            "min_score": self._get_int_setting("push_auto_score", 75),
             "auto_sources": sorted(self._get_auto_sources()),
         }
 
@@ -213,13 +214,11 @@ class AutoPublishScheduler:
         if self._is_morning_window(now):
             return now.replace(hour=MORNING_START, minute=0, second=0, microsecond=0)
         window_hours = max(1, self._get_int_setting("push_window_hours", 2))
-        base_hour = (now.hour // window_hours) * window_hours
+        base_hour = max(MORNING_END, (now.hour // window_hours) * window_hours)
         return now.replace(hour=base_hour, minute=0, second=0, microsecond=0)
 
     def _window_end(self, window_start: datetime) -> datetime:
         """Return the exclusive end boundary for the active publish window."""
-        if self._is_morning_window(window_start):
-            return window_start.replace(hour=MORNING_END, minute=0, second=0, microsecond=0)
         window_hours = max(1, self._get_int_setting("push_window_hours", 2))
         proposed = window_start + timedelta(hours=window_hours)
         day_end = window_start.replace(hour=ACTIVE_END, minute=0, second=0, microsecond=0)
