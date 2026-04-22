@@ -58,16 +58,21 @@ class AutoPublishScheduler:
 
         window_start = context["window_start"]
         window_end = context["window_end"]
+        now = context["now"]
         auto_sources = context["auto_sources"]
         max_per_window = self._get_int_setting("push_max_per_window", 1)
         pushed_in_window = self.database.count_pushes_in_window(window_start, strategy="auto")
         if pushed_in_window >= max_per_window:
             return {"ok": True, "reason": "window_full", "window_start": window_start.isoformat()}
 
+        # Only consider articles created today to avoid publishing stale content
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
         candidates = self.database.get_auto_publish_broadcast_candidates(
             min_score=context["min_score"],
             limit=max(10, max_per_window * 10),
             source_keys=auto_sources,
+            window_start=today_start,
         )
         if not candidates:
             return {"ok": True, "reason": "no_candidates"}
@@ -93,29 +98,46 @@ class AutoPublishScheduler:
                     self._record_auto_skip(chosen, window_start)
                     continue
 
+            broadcast_enabled = self._is_broadcast_enabled()
             push_label = self.pipeline_service.get_push_label(score) or "热文"
 
             try:
-                result = self.pipeline_service.auto_publish_and_broadcast(
-                    chosen,
-                    push_label=push_label,
-                )
-                cms_id = result.get("cms_id", "")
+                if broadcast_enabled:
+                    result = self.pipeline_service.auto_publish_and_broadcast(
+                        chosen,
+                        push_label=push_label,
+                    )
+                    cms_id = result.get("cms_id", "")
+                else:
+                    # Only publish to CMS, skip app broadcast
+                    result = self.pipeline_service.publish_article(chosen, strategy="auto")
+                    cms_id = result.get("cms_id", "")
+                    # Record in push_history for window dedup tracking
+                    self.database.record_push_history(
+                        article_id=chosen["article_id"],
+                        source_key=source_key,
+                        score=score,
+                        cms_id=cms_id,
+                        window_start=window_start,
+                        strategy="auto",
+                    )
+
                 log.info(
-                    "AutoPublishScheduler publish %s (score=%s, cms_id=%s, label=%s, source=%s)",
+                    "AutoPublishScheduler publish %s (score=%s, cms_id=%s, label=%s, source=%s, broadcast=%s)",
                     chosen["article_id"],
                     score,
                     cms_id,
                     push_label,
                     source_key,
+                    broadcast_enabled,
                 )
                 return {
                     "ok": True,
-                    "reason": "published_and_broadcasted",
+                    "reason": "published_and_broadcasted" if broadcast_enabled else "published",
                     "article_id": chosen["article_id"],
                     "cms_id": cms_id,
                     "score": score,
-                    "push_label": push_label,
+                    "push_label": push_label if broadcast_enabled else "",
                 }
             except Exception as exc:
                 log.error("AutoPublishScheduler failed for %s: %s", chosen.get("article_id", ""), exc)
@@ -259,3 +281,7 @@ class AutoPublishScheduler:
             except json.JSONDecodeError:
                 pass
         return {item.strip() for item in raw.split(",") if item.strip()}
+
+    def _is_broadcast_enabled(self) -> bool:
+        raw = (self.database.get_setting("broadcast_enabled") or "0").strip().lower()
+        return raw in {"1", "true", "on", "yes"}
