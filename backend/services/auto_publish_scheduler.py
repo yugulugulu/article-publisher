@@ -58,21 +58,18 @@ class AutoPublishScheduler:
 
         window_start = context["window_start"]
         window_end = context["window_end"]
-        now = context["now"]
         auto_sources = context["auto_sources"]
         max_per_window = self._get_int_setting("push_max_per_window", 1)
         pushed_in_window = self.database.count_pushes_in_window(window_start, strategy="auto")
         if pushed_in_window >= max_per_window:
             return {"ok": True, "reason": "window_full", "window_start": window_start.isoformat()}
 
-        # Only consider articles created today to avoid publishing stale content
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-
         candidates = self.database.get_auto_publish_broadcast_candidates(
             min_score=context["min_score"],
             limit=max(10, max_per_window * 10),
             source_keys=auto_sources,
-            window_start=today_start,
+            window_start=window_start,
+            window_end=window_end,
         )
         if not candidates:
             return {"ok": True, "reason": "no_candidates"}
