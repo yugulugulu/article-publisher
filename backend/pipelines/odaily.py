@@ -15,6 +15,7 @@ log = logging.getLogger("pipeline")
 
 ARTICLE_SOURCE_NAME = "Odaily星球日报"
 API_BASE = "https://web-api.odaily.news"
+DAILY_REPORT_TITLE_PATTERN = re.compile(r"24H热门币种与要闻")
 
 
 class OdailyScraper(BaseScraper):
@@ -26,6 +27,11 @@ class OdailyScraper(BaseScraper):
     """
 
     source_key = "odaily"
+
+    @staticmethod
+    def is_daily_report(title: str) -> bool:
+        """Check if the article title matches the daily report pattern."""
+        return bool(DAILY_REPORT_TITLE_PATTERN.search(title or ""))
 
     def _article_id_from_path(self, path: Path) -> str | None:
         """Extract article_id from Odaily JSON file path."""
@@ -67,6 +73,8 @@ class OdailyScraper(BaseScraper):
                 continue
             items.append({
                 "article_id": aid,
+                "title": art.get("title", ""),
+                "publish_timestamp": art.get("publishTimestamp"),
                 "original_url": f"https://www.odaily.news/zh-CN/post/{aid}",
                 "source": ARTICLE_SOURCE_NAME,
             })

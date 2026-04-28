@@ -19,6 +19,7 @@ from services.filter_service import FilterService
 from services.publisher import Publisher
 from services.push_scheduler import PushScheduler
 from services.auto_publish_scheduler import AutoPublishScheduler
+from services.daily_report import DailyReportScheduler
 from services.scorer import ScorerService
 from utils.cos import COSUploader
 
@@ -195,6 +196,7 @@ class PipelineService:
         self.scorer = ScorerService(database) if database else None
         self.push_scheduler = PushScheduler(self) if database else None
         self.auto_publish_scheduler = AutoPublishScheduler(self) if database else None
+        self.daily_report_scheduler = DailyReportScheduler(self) if database else None
         if self.filter_service:
             self.filter_service.ensure_default_rules()
         if self.database:
@@ -359,26 +361,6 @@ class PipelineService:
             article_category=score_result.get("article_category"),
         )
 
-        # Add to publish candidates pool if meets criteria
-        # This isolates new articles from historical ones
-        score = score_result["score"]
-        review_status = score_result.get("review_status", "manual_review")
-        auto_publish_enabled = score_result.get("auto_publish_enabled", False)
-
-        # Add to candidates pool if score >= 70 and not excluded
-        if score is not None and score >= 70 and review_status == "auto_candidate":
-            try:
-                self.database.add_to_publish_candidates(
-                    article_id=article["article_id"],
-                    source_key=article.get("source_key", ""),
-                    score=score,
-                    review_status=review_status,
-                    auto_publish_enabled=auto_publish_enabled,
-                )
-                log.info("Added %s to publish candidates pool (score=%d)", article["article_id"], score)
-            except Exception as exc:
-                log.warning("Failed to add %s to publish candidates: %s", article["article_id"], exc)
-
         # Auto-save CMS draft for all articles scoring >= 70
         # Auto-publish scheduler will upgrade drafts to published when it picks them up,
         # using the existing cms_id so no duplicate is created.
@@ -417,6 +399,12 @@ class PipelineService:
             "scheduler": self.auto_publish_scheduler.get_status() if self.auto_publish_scheduler else {},
             "broadcast": self.auto_publish_scheduler.get_broadcast_status() if self.auto_publish_scheduler else {},
         }
+
+    def get_daily_report_status(self) -> dict:
+        """Return daily report scheduler status."""
+        if not self.daily_report_scheduler:
+            return {"enabled": False, "available": False}
+        return self.daily_report_scheduler.get_status()
 
     @staticmethod
     def get_push_label(score: int | None) -> str:
@@ -509,7 +497,7 @@ class PipelineService:
 
         return result
 
-    def auto_publish_and_broadcast(self, article: dict, push_label: str = "", window_start: datetime | None = None) -> dict:
+    def auto_publish_and_broadcast(self, article: dict, push_label: str = "", window_start: datetime | None = None, push_content: str = "") -> dict:
         """Atomic: publish article to CMS then broadcast to App.
 
         Used by AutoPublishScheduler for the unified publish+push flow.
@@ -554,6 +542,7 @@ class PipelineService:
             cms_id=cms_id,
             title=article.get("title", ""),
             push_label=push_label or self.get_push_label(prepared.get("score")),
+            push_content=push_content,
         )
 
         if self.database:
@@ -591,6 +580,9 @@ class PipelineService:
         if self.database:
             published_ids.update(self.database.get_published_ids())
 
+        # Limit: max 5 articles per source to avoid fetching old articles
+        MAX_ARTICLES_PER_SOURCE = 5
+
         for key, scraper in self.scrapers.items():
             if self.run_state.cancelled:
                 log.warning("Ingest cancelled, stopping early")
@@ -600,8 +592,14 @@ class PipelineService:
             if source not in (key, "all") or not src_cfg.get("enabled", True):
                 continue
 
+            fetched_count = 0
             for item in scraper.parse_list():
                 if self.run_state.cancelled:
+                    break
+
+                # Stop if we've fetched enough articles for this source
+                if fetched_count >= MAX_ARTICLES_PER_SOURCE:
+                    log.info("Source %s: reached limit of %d articles, stopping", key.upper(), MAX_ARTICLES_PER_SOURCE)
                     break
 
                 canonical_id = self._canonical_article_id(key, item.get("article_id", ""))
@@ -671,6 +669,7 @@ class PipelineService:
                         self._store_and_score_article(article)
 
                     fetched.append(article["article_id"])
+                    fetched_count += 1
                     log.info("Fetched %s: %s - %s", key.upper(), article["article_id"], article.get("title", "")[:40])
                 except Exception as e:
                     log.error("Fetch %s %s failed: %s", key.upper(), item.get("article_id", ""), e)
@@ -1033,6 +1032,8 @@ class PipelineService:
             sched.stop()
         if self.auto_publish_scheduler:
             self.auto_publish_scheduler.stop()
+        if self.daily_report_scheduler:
+            self.daily_report_scheduler.stop()
         if self.push_scheduler:
             self.push_scheduler.stop()
 

@@ -238,13 +238,14 @@ class Publisher:
         """Create or update a CMS article and make it public."""
         return self._submit(article, is_public=True)
 
-    def push_to_app(self, cms_id: str, title: str, push_label: str = "") -> dict:
+    def push_to_app(self, cms_id: str, title: str, push_label: str = "", push_content: str = "") -> dict:
         """Push a published article as an App desktop notification.
 
         Args:
             cms_id: The CMS content ID (required).
-            title: Original article title (used as push_content).
+            title: Original article title (used as push_content fallback).
             push_label: "热文" or "爆文" (used as push_title). Falls back to title.
+            push_content: Custom push body text. Falls back to title.
         """
         if not self.push_url:
             raise RuntimeError("Push URL not configured")
@@ -253,7 +254,7 @@ class Publisher:
 
         payload = {
             "push_title": push_label or (title or "")[:120] or "资讯推送",
-            "push_content": (title or "")[:400],
+            "push_content": (push_content or title or "")[:400],
             "push_id": str(cms_id),
             "push_type": 5,
         }
