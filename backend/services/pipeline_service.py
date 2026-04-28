@@ -664,6 +664,17 @@ class PipelineService:
                             log.info("Skip %s by content rule: %s", article["article_id"], article.get("filter_reason", ""))
                             continue
 
+                    # Semantic dedup against website published articles
+                    if self.database and article.get("title"):
+                        try:
+                            from services.llm import semantic_dedup, fetch_website_titles
+                            website_titles = fetch_website_titles(limit=6)
+                            if semantic_dedup(article.get("title", ""), [], self.database, website_titles=website_titles):
+                                log.info("Skip %s: semantic duplicate with website article", article["article_id"])
+                                continue
+                        except Exception as e:
+                            log.warning("Website semantic dedup check failed for %s: %s", article.get("article_id", ""), e)
+
                     scraper.save(article)
                     if self.database:
                         self._store_and_score_article(article)

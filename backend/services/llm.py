@@ -87,15 +87,59 @@ def generate_abstract(article: dict, db: ArticleDatabase) -> str:
     return fallback
 
 
-def semantic_dedup(title: str, recent_titles: list[str], db: ArticleDatabase) -> bool:
-    """Use LLM to check if *title* is semantically duplicate of any *recent_titles*.
+def fetch_website_titles(limit: int = 6) -> list[str]:
+    """Fetch recent published article titles from chainthink.cn website.
+
+    Parses the HTML article list page to extract titles from h3 tags.
+    """
+    import requests
+    from bs4 import BeautifulSoup
+
+    url = "https://chainthink.cn/zh-CN/article"
+    try:
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # Extract titles from h3 tags
+        titles = []
+        for h3 in soup.find_all('h3'):
+            title = h3.get_text(strip=True)
+            if title and len(title) > 5:  # Minimum reasonable title length
+                titles.append(title)
+                if len(titles) >= limit:
+                    break
+
+        log.info("[LLM] Fetched %d titles from chainthink.cn", len(titles))
+        return titles
+    except Exception as e:
+        log.warning("[LLM] Failed to fetch website titles: %s", e)
+        return []
+
+
+def semantic_dedup(title: str, recent_titles: list[str], db: ArticleDatabase, website_titles: list[str] | None = None) -> bool:
+    """Use LLM to check if *title* is semantically duplicate of any titles.
+
+    Args:
+        title: New article title to check
+        recent_titles: Recently published/broadcast titles from local DB
+        db: ArticleDatabase instance
+        website_titles: Optional titles from chainthink.cn website
 
     Returns True if the title is considered a duplicate.
     """
-    if not recent_titles:
+    # Combine all titles for dedup check
+    all_titles = list(recent_titles)
+    if website_titles:
+        all_titles.extend(website_titles)
+
+    if not all_titles:
         return False
 
-    titles_list = "\n".join(f"{i+1}. {t}" for i, t in enumerate(recent_titles))
+    # Limit to recent 12 titles total (6 local + 6 website)
+    all_titles = all_titles[:12]
+
+    titles_list = "\n".join(f"{i+1}. {t}" for i, t in enumerate(all_titles))
     prompt = (
         "你是一个新闻去重判断助手。判断以下新标题是否与已有标题列表中的任何一篇是"
         "「同一篇报道的不同来源转载」或「高度雷同的改写」。\n"
@@ -115,7 +159,10 @@ def semantic_dedup(title: str, recent_titles: list[str], db: ArticleDatabase) ->
             match = _re.search(r'\{[^}]+\}', response)
             if match:
                 data = json.loads(match.group(0))
-                return bool(data.get("duplicate", False))
+                is_dup = bool(data.get("duplicate", False))
+                if is_dup:
+                    log.info("[LLM] semantic dedup: '%s' is duplicate of website titles", title[:50])
+                return is_dup
     except Exception as e:
         log.warning("[LLM] semantic_dedup failed, assuming not duplicate: %s", e)
 
