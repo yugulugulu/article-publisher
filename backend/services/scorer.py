@@ -118,15 +118,17 @@ class ScorerService:
             score += 10
             matched_categories.append((5, 10, category_5_matches))
 
+        length_penalty = 0
         if content_length > 5000 or content_length < 200:
-            score -= LENGTH_PENALTY
+            length_penalty = LENGTH_PENALTY
+            score -= length_penalty
 
         score = max(0, min(100, score))
         review_status, auto_publish_enabled = self.decide_review_status(article.get("source_key", ""), score)
         article_category = self._detect_article_category(article)
 
         tags = self._build_tags(matched_categories, article_category)
-        reason = self._build_reason(score, matched_categories)
+        reason = self._build_reason(score, matched_categories, length_penalty, content_length)
 
         return {
             "score": score,
@@ -167,16 +169,26 @@ class ScorerService:
         return sum(len((block.get("text") or "").strip()) for block in article.get("blocks", []) if block.get("type") != "img")
 
     @staticmethod
-    def _build_reason(score: int, matched_categories: list[tuple[int, int, list[str]]]) -> str:
+    def _build_reason(score: int, matched_categories: list[tuple[int, int, list[str]]],
+                      length_penalty: int = 0, content_length: int = 0) -> str:
         level = "爆文" if score >= EXPLOSIVE_THRESHOLD else "热文" if score >= HOT_THRESHOLD else "未达标"
-        lines = [f"最终得分：{score}分", "加分项明细："]
+        lines = [f"最终得分：{score}分", f"基础分：{BASE_SCORE}分"]
+
+        # Addition items
+        lines.append("加分项：")
         if matched_categories:
-            for index, (category_no, _, matches) in enumerate(matched_categories, start=1):
+            for index, (category_no, points, matches) in enumerate(matched_categories, start=1):
                 display = "、".join(matches)
-                lines.append(f"{index}. 第{category_no}类加分项：[{display}]")
+                lines.append(f"{index}. 第{category_no}类 +{points}分：[{display}]")
         else:
-            lines.append("1. 第0类加分项：[无]")
-        lines.append(f"等级判定：[{level}]")
+            lines.append("1. 无匹配加分项")
+
+        # Deduction items
+        if length_penalty > 0:
+            reason_text = "正文过长(>5000字)" if content_length > 5000 else "正文过短(<200字)"
+            lines.append(f"扣分项：-{length_penalty}分（{reason_text}，共{content_length}字）")
+
+        lines.append(f"等级：[{level}]")
         return "\n".join(lines)
 
     @staticmethod
