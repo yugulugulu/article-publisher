@@ -28,6 +28,11 @@ async function request(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
 
   if (res.status === 401) {
+    // Login endpoint: return the actual error message (e.g. "用户名或密码错误")
+    if (path === '/auth/login') {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || '用户名或密码错误');
+    }
     clearToken();
     window.dispatchEvent(new Event('auth:logout'));
     throw new Error('认证已过期，请重新登录');
@@ -158,6 +163,9 @@ export const api = {
   runWorkflowPushCheck: () => request('/workflow/push-check', { method: 'POST' }),
   runWorkflowBroadcastCheck: () => request('/workflow/broadcast-check', { method: 'POST' }),
   rescoreUnscored: (sinceDate = '2026-04-17') => request(`/workflow/rescore-unscored?since_date=${sinceDate}`, { method: 'POST' }),
+  getDailyReportStatus: () => request('/daily-report/status'),
+  triggerDailyReport: () => request('/daily-report/trigger', { method: 'POST' }),
+  toggleDailyReport: (enabled) => request('/daily-report/toggle', { method: 'POST', body: JSON.stringify({ enabled }) }),
   getBlocklist: () => request('/blocklist'),
   createBlocklistRule: (data) => request('/blocklist', { method: 'POST', body: JSON.stringify(data) }),
   updateBlocklistRule: (id, data) => request(`/blocklist/${id}`, { method: 'PUT', body: JSON.stringify(data) }),

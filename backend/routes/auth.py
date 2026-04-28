@@ -49,19 +49,30 @@ def init_auth(config: dict, database=None):
 
 
 def verify_token(token: str) -> dict | None:
-    """Verify a token. Returns {username, role} if valid, None otherwise."""
+    """Verify a token. Returns {username, role} if valid, None otherwise.
+
+    Guest tokens never expire (max_age=None). Admin tokens use the configured max_age.
+    """
     try:
-        data = _serializer.loads(token, max_age=_max_age)
+        # First decode without age check to read the role
+        data = _serializer.loads(token, max_age=None)
         username = data.get("u")
         if not username:
             return None
-        # Get role from token, fallback to DB lookup, then default admin
         role = data.get("r")
         if not role and _db:
             user = _db.get_user_by_username(username)
             if user:
                 role = user.get("role", "admin")
-        return {"username": username, "role": role or "admin"}
+        role = role or "admin"
+
+        # Guest tokens: no expiration
+        if role == "guest":
+            return {"username": username, "role": role}
+
+        # Admin tokens: enforce max_age
+        _serializer.loads(token, max_age=_max_age)
+        return {"username": username, "role": role}
     except (SignatureExpired, BadSignature):
         return None
 
