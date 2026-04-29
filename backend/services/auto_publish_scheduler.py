@@ -185,15 +185,20 @@ class AutoPublishScheduler:
 
             if self._is_in_site_check_enabled():
                 if in_site_fetch_failed:
-                    log.info("AutoPublishScheduler skip %s: in-site articles unavailable", chosen["article_id"])
-                    self._record_auto_skip(
-                        chosen,
-                        window_start,
-                        strategy=AUTO_SKIP_IN_SITE_UNAVAILABLE,
-                        skip_reason="failed_to_fetch_in_site_articles",
-                        in_site_article={"url": self._get_setting("push_in_site_article_url", DEFAULT_IN_SITE_ARTICLE_URL)},
-                    )
-                    continue
+                    if self._is_in_site_check_strict():
+                        # Strict mode: skip all candidates when in-site fetch fails
+                        log.info("AutoPublishScheduler skip %s: in-site articles unavailable (strict mode)", chosen["article_id"])
+                        self._record_auto_skip(
+                            chosen,
+                            window_start,
+                            strategy=AUTO_SKIP_IN_SITE_UNAVAILABLE,
+                            skip_reason="failed_to_fetch_in_site_articles",
+                            in_site_article={"url": self._get_setting("push_in_site_article_url", DEFAULT_IN_SITE_ARTICLE_URL)},
+                        )
+                        continue
+                    else:
+                        # Fallback mode: log warning but proceed with publishing
+                        log.warning("AutoPublishScheduler: in-site articles unavailable, proceeding due to fallback mode (aid=%s)", chosen["article_id"])
 
                 allowed, matched_article, skip_reason = self._check_in_site_publish_interval(
                     chosen,
@@ -461,15 +466,30 @@ class AutoPublishScheduler:
             pass
 
         text = text.replace("年", "-").replace("月", "-").replace("日", " ").replace("/", "-")
+
+        # Try YYYY-MM-DD format first
         match = re.search(r"\d{4}-\d{1,2}-\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?", text)
-        if not match:
-            return None
-        value = match.group(0)
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        if match:
+            value = match.group(0)
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(value, fmt)
+                except ValueError:
+                    continue
+
+        # Try MM-DD HH:MM format (without year), use current year
+        match = re.search(r"(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?", text)
+        if match:
             try:
-                return datetime.strptime(value, fmt)
-            except ValueError:
-                continue
+                month, day = int(match.group(1)), int(match.group(2))
+                hour, minute = 0, 0
+                if match.group(3):
+                    hour, minute = int(match.group(3)), int(match.group(4))
+                current_year = datetime.now().year
+                return datetime(current_year, month, day, hour, minute)
+            except (ValueError, TypeError):
+                pass
+
         return None
 
     def _get_setting(self, key: str, default: str = "") -> str:
@@ -478,6 +498,10 @@ class AutoPublishScheduler:
 
     def _is_in_site_check_enabled(self) -> bool:
         raw = (self.database.get_setting("push_in_site_check_enabled") or "1").strip().lower()
+        return raw not in {"0", "false", "off", "no"}
+
+    def _is_in_site_check_strict(self) -> bool:
+        raw = (self.database.get_setting("push_in_site_check_strict") or "1").strip().lower()
         return raw not in {"0", "false", "off", "no"}
 
     def _cleanup_stale_candidates(self, published_id: str, window_start: datetime) -> int:
