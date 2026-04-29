@@ -92,7 +92,11 @@ class ArticleDatabase:
                 published_at TEXT,
                 cms_id TEXT,
                 broadcasted_at TEXT,
-                broadcast_strategy TEXT
+                broadcast_strategy TEXT,
+                in_site_conflict_url TEXT,
+                in_site_conflict_title TEXT,
+                in_site_conflict_published_at TEXT,
+                in_site_checked_at TEXT
             )
         """
         )
@@ -149,7 +153,11 @@ class ArticleDatabase:
                 cms_id TEXT,
                 pushed_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 window_start TEXT,
-                strategy TEXT DEFAULT 'auto'
+                strategy TEXT DEFAULT 'auto',
+                skip_reason TEXT,
+                in_site_article_url TEXT,
+                in_site_article_title TEXT,
+                in_site_article_published_at TEXT
             )
         """
         )
@@ -194,6 +202,14 @@ class ArticleDatabase:
             "ALTER TABLE articles ADD COLUMN broadcasted_at TEXT",
             "ALTER TABLE articles ADD COLUMN broadcast_strategy TEXT",
             "ALTER TABLE articles ADD COLUMN article_category TEXT DEFAULT 'other'",
+            "ALTER TABLE articles ADD COLUMN in_site_conflict_url TEXT",
+            "ALTER TABLE articles ADD COLUMN in_site_conflict_title TEXT",
+            "ALTER TABLE articles ADD COLUMN in_site_conflict_published_at TEXT",
+            "ALTER TABLE articles ADD COLUMN in_site_checked_at TEXT",
+            "ALTER TABLE push_history ADD COLUMN skip_reason TEXT",
+            "ALTER TABLE push_history ADD COLUMN in_site_article_url TEXT",
+            "ALTER TABLE push_history ADD COLUMN in_site_article_title TEXT",
+            "ALTER TABLE push_history ADD COLUMN in_site_article_published_at TEXT",
         ]:
             try:
                 conn.execute(col_sql)
@@ -898,6 +914,46 @@ class ArticleDatabase:
         ).fetchall()
         return [row["article_id"] for row in rows]
 
+    def get_stale_local_scored_articles(
+        self,
+        source_keys: list[str],
+        min_score: int = 70,
+        limit: int = 5,
+    ) -> list[dict]:
+        """Get scored articles stuck at publish_stage='local' that failed CMS draft save.
+
+        Used by AutoPublishScheduler to retry draft saves after transient failures
+        (e.g. expired CMS token).
+        """
+        if not source_keys:
+            return []
+        conn = self._get_conn()
+        placeholders = ", ".join("?" for _ in source_keys)
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM articles
+            WHERE source_key IN ({placeholders})
+              AND COALESCE(publish_stage, 'local') = 'local'
+              AND filter_status = 'passed'
+              AND score IS NOT NULL
+              AND score >= ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM push_history ph
+                  WHERE ph.article_id = articles.article_id
+                    AND ph.strategy IN ('auto', 'auto_skip')
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM broadcast_history bh
+                  WHERE bh.article_id = articles.article_id
+              )
+            ORDER BY score DESC, scored_at DESC
+            LIMIT ?
+            """,
+            list(source_keys) + [min_score, limit],
+        ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def record_push_history(
         self,
         article_id: str,
@@ -906,13 +962,20 @@ class ArticleDatabase:
         cms_id: str,
         window_start: datetime,
         strategy: str = "auto",
+        skip_reason: str = "",
+        in_site_article_url: str = "",
+        in_site_article_title: str = "",
+        in_site_article_published_at: str = "",
     ) -> int:
         """Insert a push history record."""
         conn = self._get_conn()
         conn.execute(
             """
-            INSERT INTO push_history (article_id, source_key, score, cms_id, pushed_at, window_start, strategy)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO push_history (
+                article_id, source_key, score, cms_id, pushed_at, window_start, strategy,
+                skip_reason, in_site_article_url, in_site_article_title, in_site_article_published_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 article_id,
@@ -922,11 +985,41 @@ class ArticleDatabase:
                 datetime.now().isoformat(),
                 window_start.isoformat(),
                 strategy,
+                skip_reason,
+                in_site_article_url,
+                in_site_article_title,
+                in_site_article_published_at,
             ),
         )
         conn.commit()
         row = conn.execute("SELECT last_insert_rowid()").fetchone()
         return row[0] if row else 0
+
+    def record_in_site_conflict(self, article_id: str, site_article: dict | None, reason: str = "") -> bool:
+        """Save the latest in-site article conflict metadata on the article row."""
+        site_article = site_article or {}
+        conn = self._get_conn()
+        cursor = conn.execute(
+            """
+            UPDATE articles
+            SET in_site_conflict_url = ?,
+                in_site_conflict_title = ?,
+                in_site_conflict_published_at = ?,
+                in_site_checked_at = ?,
+                updated_at = ?
+            WHERE article_id = ?
+            """,
+            (
+                site_article.get("url", ""),
+                _sanitize_for_gbk(site_article.get("title", "")),
+                site_article.get("published_at", ""),
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+                article_id,
+            ),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
 
     def cleanup_stale_candidates(self, published_id: str, window_start: datetime) -> int:
         """Mark stale auto-candidates (scored before current window) as ineligible."""
@@ -1280,7 +1373,7 @@ class ArticleDatabase:
         return [self._row_to_dict(row) for row in rows]
 
     # Sources excluded from auto-publish (scraper removed but DB may have stale data)
-    AUTO_PUBLISH_EXCLUDED_SOURCES = {"bestblogs"}
+    AUTO_PUBLISH_EXCLUDED_SOURCES = {"bestblogs", "chaincatcher"}
 
     def get_auto_publish_broadcast_candidates(
         self,
@@ -1492,6 +1585,10 @@ class ArticleDatabase:
             "scored_at": row["scored_at"] if "scored_at" in row.keys() else None,
             "broadcasted_at": row["broadcasted_at"] if "broadcasted_at" in row.keys() else None,
             "broadcast_strategy": row["broadcast_strategy"] if "broadcast_strategy" in row.keys() else None,
+            "in_site_conflict_url": row["in_site_conflict_url"] if "in_site_conflict_url" in row.keys() else None,
+            "in_site_conflict_title": row["in_site_conflict_title"] if "in_site_conflict_title" in row.keys() else None,
+            "in_site_conflict_published_at": row["in_site_conflict_published_at"] if "in_site_conflict_published_at" in row.keys() else None,
+            "in_site_checked_at": row["in_site_checked_at"] if "in_site_checked_at" in row.keys() else None,
         }
 
         tags_raw = row["tags"] if "tags" in row.keys() else None

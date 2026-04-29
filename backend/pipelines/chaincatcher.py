@@ -158,6 +158,7 @@ class ChainCatcherScraper(BaseScraper):
             **item,
             "source_key": "chaincatcher",
             "article_id_full": item.get("article_id_full", f"chaincatcher:{item.get('article_id', '')}"),
+            "raw_id": item.get("article_id", ""),
             "title": title,
             "source": ARTICLE_SOURCE_NAME,
             "author": "",

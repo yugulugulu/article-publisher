@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timedelta
 
@@ -26,6 +27,10 @@ ACTIVE_END = 23
 MORNING_START = 8
 MORNING_END = 10
 AUTO_SKIP_STRATEGY = "auto_skip"
+AUTO_SKIP_IN_SITE_INTERVAL = "auto_skip_in_site_interval"
+AUTO_SKIP_IN_SITE_UNAVAILABLE = "auto_skip_in_site_unavailable"
+AUTO_SKIP_IN_SITE_TIME_UNPARSEABLE = "auto_skip_in_site_time_unparseable"
+DEFAULT_IN_SITE_ARTICLE_URL = "https://chainthink.cn/zh-CN/article"
 
 EXPLOSIVE_THRESHOLD = 85  # 爆文
 HOT_THRESHOLD = 75        # 热文
@@ -140,8 +145,23 @@ class AutoPublishScheduler:
         *,
         is_fallback: bool = False,
     ) -> dict:
-        """Try candidates in order: dedup → exclude → publish + broadcast."""
+        """Try candidates in order: dedup → exclude → in-site interval → publish + broadcast."""
         recent_titles = self.database.get_recent_auto_publish_broadcast_titles(limit=6)
+        in_site_articles = []
+        in_site_fetch_failed = False
+        if self._is_in_site_check_enabled():
+            try:
+                from services.llm import fetch_website_articles
+
+                in_site_articles = fetch_website_articles(
+                    limit=self._get_int_setting("push_in_site_limit", 10),
+                    url=self._get_setting("push_in_site_article_url", DEFAULT_IN_SITE_ARTICLE_URL),
+                )
+            except Exception as exc:
+                in_site_fetch_failed = True
+                log.warning("AutoPublishScheduler failed to fetch in-site articles: %s", exc)
+            if not in_site_articles:
+                in_site_fetch_failed = True
 
         for chosen in candidates:
             score = chosen.get("score") or 0
@@ -161,6 +181,42 @@ class AutoPublishScheduler:
                 if is_dup:
                     log.info("AutoPublishScheduler skip %s: semantic duplicate", chosen["article_id"])
                     self._record_auto_skip(chosen, window_start)
+                    continue
+
+            if self._is_in_site_check_enabled():
+                if in_site_fetch_failed:
+                    log.info("AutoPublishScheduler skip %s: in-site articles unavailable", chosen["article_id"])
+                    self._record_auto_skip(
+                        chosen,
+                        window_start,
+                        strategy=AUTO_SKIP_IN_SITE_UNAVAILABLE,
+                        skip_reason="failed_to_fetch_in_site_articles",
+                        in_site_article={"url": self._get_setting("push_in_site_article_url", DEFAULT_IN_SITE_ARTICLE_URL)},
+                    )
+                    continue
+
+                allowed, matched_article, skip_reason = self._check_in_site_publish_interval(
+                    chosen,
+                    in_site_articles,
+                    self._get_int_setting("push_in_site_min_interval_minutes", 30),
+                )
+                if not allowed:
+                    strategy = AUTO_SKIP_IN_SITE_INTERVAL
+                    if "unparseable" in skip_reason:
+                        strategy = AUTO_SKIP_IN_SITE_TIME_UNPARSEABLE
+                    log.info(
+                        "AutoPublishScheduler skip %s: %s (site=%s)",
+                        chosen["article_id"],
+                        skip_reason,
+                        (matched_article or {}).get("url", ""),
+                    )
+                    self._record_auto_skip(
+                        chosen,
+                        window_start,
+                        strategy=strategy,
+                        skip_reason=skip_reason,
+                        in_site_article=matched_article,
+                    )
                     continue
 
             push_label = self.pipeline_service.get_push_label(score) or "热文"
@@ -290,6 +346,35 @@ class AutoPublishScheduler:
         day_end = window_start.replace(hour=ACTIVE_END, minute=0, second=0, microsecond=0)
         return proposed if proposed <= day_end else day_end
 
+    # -- Retry stale local articles --
+
+    def _retry_stale_local_articles(self):
+        """Retry CMS draft saves for articles stuck at publish_stage='local'.
+
+        Recovers articles that scored well but failed to enter CMS due to
+        transient errors (e.g. expired token). Runs each scheduler cycle.
+        """
+        all_sources = self.pipeline_service.get_managed_source_keys()
+        if not all_sources:
+            return
+
+        stale = self.database.get_stale_local_scored_articles(
+            source_keys=all_sources,
+            min_score=70,
+            limit=5,
+        )
+        if not stale:
+            return
+
+        log.info("AutoPublishScheduler retrying %d stale local articles", len(stale))
+        for article in stale:
+            aid = article["article_id"]
+            try:
+                self.pipeline_service.save_article_draft(article, strategy="auto_score")
+                log.info("Retry draft save succeeded for %s (score=%s)", aid, article.get("score"))
+            except Exception as exc:
+                log.warning("Retry draft save failed for %s: %s", aid, exc)
+
     # -- Loop --
 
     def _loop(self):
@@ -299,21 +384,101 @@ class AutoPublishScheduler:
             if self._stop_event.is_set():
                 break
             try:
+                self._retry_stale_local_articles()
                 self.run_once()
             except Exception as exc:
                 log.error("AutoPublishScheduler loop failed: %s", exc)
 
     # -- Utility methods --
 
-    def _record_auto_skip(self, article: dict, window_start: datetime) -> None:
+    def _record_auto_skip(
+        self,
+        article: dict,
+        window_start: datetime,
+        strategy: str = AUTO_SKIP_STRATEGY,
+        skip_reason: str = "",
+        in_site_article: dict | None = None,
+    ) -> None:
+        in_site_article = in_site_article or {}
         self.database.record_push_history(
             article_id=article["article_id"],
             source_key=article.get("source_key", ""),
             score=article.get("score"),
             cms_id="",
             window_start=window_start,
-            strategy=AUTO_SKIP_STRATEGY,
+            strategy=strategy,
+            skip_reason=skip_reason,
+            in_site_article_url=in_site_article.get("url", ""),
+            in_site_article_title=in_site_article.get("title", ""),
+            in_site_article_published_at=in_site_article.get("published_at", ""),
         )
+        if in_site_article:
+            self.database.record_in_site_conflict(article["article_id"], in_site_article, skip_reason)
+
+    def _check_in_site_publish_interval(
+        self,
+        article: dict,
+        in_site_articles: list[dict],
+        min_minutes: int,
+    ) -> tuple[bool, dict | None, str]:
+        candidate_time = self._parse_article_time(
+            article.get("source_publish_time")
+            or article.get("publish_time")
+            or article.get("published_at")
+            or article.get("scored_at")
+            or article.get("created_at")
+        )
+        if not candidate_time:
+            return False, None, "candidate_time_unparseable"
+
+        parsed_articles: list[tuple[dict, datetime]] = []
+        first_article = in_site_articles[0] if in_site_articles else None
+        for item in in_site_articles:
+            published_at = self._parse_article_time(item.get("published_at") or item.get("raw_time"))
+            if published_at:
+                parsed_articles.append((item, published_at))
+
+        if not parsed_articles:
+            return False, first_article, "all_in_site_article_times_unparseable"
+
+        threshold = timedelta(minutes=max(0, min_minutes))
+        for item, published_at in parsed_articles:
+            interval = abs(candidate_time - published_at)
+            if interval <= threshold:
+                return False, item, f"in_site_interval_not_greater_than_{min_minutes}_minutes"
+        return True, None, ""
+
+    @staticmethod
+    def _parse_article_time(value: str | None) -> datetime | None:
+        raw = (value or "").strip()
+        if not raw:
+            return None
+        text = raw.replace("Z", "").strip()
+        text = re.sub(r"([+-]\d{2}:?\d{2})$", "", text).strip()
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            pass
+
+        text = text.replace("年", "-").replace("月", "-").replace("日", " ").replace("/", "-")
+        match = re.search(r"\d{4}-\d{1,2}-\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?", text)
+        if not match:
+            return None
+        value = match.group(0)
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _get_setting(self, key: str, default: str = "") -> str:
+        raw = self.database.get_setting(key)
+        return raw if raw not in {None, ""} else default
+
+    def _is_in_site_check_enabled(self) -> bool:
+        raw = (self.database.get_setting("push_in_site_check_enabled") or "1").strip().lower()
+        return raw not in {"0", "false", "off", "no"}
 
     def _cleanup_stale_candidates(self, published_id: str, window_start: datetime) -> int:
         """Mark stale candidates (scored before current window) as ineligible."""

@@ -185,3 +185,38 @@ def rescore_unscored_articles(request: Request, _admin=Depends(require_admin)):
             "message": f"已处理 {results['processed']}/{results['total']} 篇，剩余 {remaining} 篇。请再次点击按钮继续处理。"
         }
     return {"ok": True, **results}
+
+
+# ---------------------------------------------------------------------------
+# Daily Report endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get("/daily-report/status")
+def get_daily_report_status(request: Request):
+    """Get daily report scheduler status."""
+    svc = request.app.state.pipeline_service
+    return svc.get_daily_report_status()
+
+
+@router.post("/daily-report/trigger")
+def trigger_daily_report(request: Request, _admin=Depends(require_admin)):
+    """Manually trigger a daily report check and publish."""
+    svc = request.app.state.pipeline_service
+    if not svc.daily_report_scheduler:
+        raise HTTPException(501, "Daily report scheduler not configured")
+    result = svc.daily_report_scheduler.trigger_manual()
+    if result.get("ok") and result.get("reason") == "published":
+        log.info("Manual daily report trigger: published %s", result.get("article_id"))
+    return result
+
+
+@router.post("/daily-report/toggle")
+async def toggle_daily_report(request: Request, _admin=Depends(require_admin)):
+    """Toggle daily report auto-publish on/off."""
+    svc = request.app.state.pipeline_service
+    if not svc.daily_report_scheduler:
+        raise HTTPException(501, "Daily report scheduler not configured")
+    body = await request.json()
+    enabled = body.get("enabled", True)
+    return svc.daily_report_scheduler.toggle(enabled)

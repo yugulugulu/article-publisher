@@ -189,12 +189,12 @@ class Publisher:
         # 否则，只有单纯的作者名时添加 "作者：" 前缀
         if author:
             if any(author.startswith(p) for p in ("作者", "编辑")) or "｜" in author or "、" in author:
-                parts.append(f"<p><strong>{self.html_escape(author)}</strong></p>")
+                parts.append(f"<p>{self.html_escape(author)}</p>")
             else:
-                parts.append(f"<p><strong>作者：{self.html_escape(author)}</strong></p>")
+                parts.append(f"<p>作者：{self.html_escape(author)}</p>")
 
         if source:
-            parts.append(f"<p><strong>来源：{self.html_escape(source)}</strong></p>")
+            parts.append(f"<p>来源：{self.html_escape(source)}</p>")
 
         return "".join(parts)
 

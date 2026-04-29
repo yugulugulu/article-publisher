@@ -4,7 +4,9 @@
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Optional
+from urllib.parse import urljoin
 
 from services.database import ArticleDatabase
 
@@ -87,11 +89,116 @@ def generate_abstract(article: dict, db: ArticleDatabase) -> str:
     return fallback
 
 
+def _parse_website_article_time(raw: str) -> datetime | None:
+    """Parse common ChainThink article time strings."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+
+    text = re.sub(r"\s+", " ", raw)
+    text = text.replace("年", "-").replace("月", "-").replace("日", " ").strip()
+    text = text.replace("/", "-")
+    text = re.sub(r"(\d{4}-\d{1,2}-\d{1,2})T", r"\1 ", text)
+    text = re.sub(r"([+-]\d{2}:?\d{2}|Z)$", "", text).strip()
+
+    match = re.search(r"\d{4}-\d{1,2}-\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?", text)
+    if not match:
+        return None
+
+    value = match.group(0)
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _extract_website_time(container) -> tuple[str, datetime | None]:
+    time_tag = container.find("time") if container else None
+    candidates: list[str] = []
+    if time_tag:
+        candidates.extend([
+            time_tag.get("datetime", ""),
+            time_tag.get("title", ""),
+            time_tag.get_text(" ", strip=True),
+        ])
+
+    if container:
+        text = container.get_text(" ", strip=True)
+        candidates.extend(re.findall(r"\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?\s*\d{1,2}:\d{2}(?::\d{2})?", text))
+
+    for raw in candidates:
+        parsed = _parse_website_article_time(raw)
+        if parsed:
+            return raw.strip(), parsed
+    return "", None
+
+
+def _extract_website_article_url(h3, base_url: str) -> str:
+    link = h3.find_parent("a", href=True)
+    if not link:
+        parent = h3.find_parent()
+        for _ in range(4):
+            if not parent:
+                break
+            link = parent.find("a", href=True)
+            if link and link.get("href"):
+                break
+            parent = parent.find_parent()
+
+    href = link.get("href", "") if link else ""
+    if not href:
+        return ""
+    return urljoin(base_url, href)
+
+
+def fetch_website_articles(limit: int = 10, url: str = "https://chainthink.cn/zh-CN/article") -> list[dict]:
+    """Fetch recent published article metadata from chainthink.cn website."""
+    import requests
+    from bs4 import BeautifulSoup
+
+    try:
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        articles = []
+        seen_titles = set()
+        for h3 in soup.find_all("h3"):
+            title = h3.get_text(strip=True)
+            if not title or len(title) <= 5 or title in seen_titles:
+                continue
+
+            container = h3.find_parent("article") or h3.find_parent("li") or h3.find_parent("div") or h3
+            raw_time, parsed_time = _extract_website_time(container)
+            articles.append({
+                "title": title,
+                "url": _extract_website_article_url(h3, url),
+                "published_at": parsed_time.isoformat() if parsed_time else "",
+                "raw_time": raw_time,
+            })
+            seen_titles.add(title)
+            if len(articles) >= limit:
+                break
+
+        log.info("[LLM] Fetched %d articles from chainthink.cn", len(articles))
+        return articles
+    except Exception as e:
+        log.warning("[LLM] Failed to fetch website articles: %s", e)
+        return []
+
+
 def fetch_website_titles(limit: int = 6) -> list[str]:
     """Fetch recent published article titles from chainthink.cn website.
 
     Parses the HTML article list page to extract titles from h3 tags.
     """
+    articles = fetch_website_articles(limit=limit)
+    titles = [item.get("title", "") for item in articles if item.get("title")]
+    if titles:
+        return titles
+
     import requests
     from bs4 import BeautifulSoup
 
@@ -101,11 +208,10 @@ def fetch_website_titles(limit: int = 6) -> list[str]:
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # Extract titles from h3 tags
         titles = []
         for h3 in soup.find_all('h3'):
             title = h3.get_text(strip=True)
-            if title and len(title) > 5:  # Minimum reasonable title length
+            if title and len(title) > 5:
                 titles.append(title)
                 if len(titles) >= limit:
                     break

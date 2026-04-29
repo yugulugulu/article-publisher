@@ -75,6 +75,8 @@ async def lifespan(app: FastAPI):
     # Broadcast happens inline when broadcast_enabled=1 during auto-publish.
     if svc.auto_publish_scheduler:
         svc.auto_publish_scheduler.start()
+    if svc.daily_report_scheduler:
+        svc.daily_report_scheduler.start()
 
     # Set default schedules for sources without saved config (10-20 min)
     # Blockchain sources: 15 min default
