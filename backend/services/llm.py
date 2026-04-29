@@ -101,16 +101,29 @@ def _parse_website_article_time(raw: str) -> datetime | None:
     text = re.sub(r"(\d{4}-\d{1,2}-\d{1,2})T", r"\1 ", text)
     text = re.sub(r"([+-]\d{2}:?\d{2}|Z)$", "", text).strip()
 
+    # Try full date format first: YYYY-MM-DD HH:MM:SS
     match = re.search(r"\d{4}-\d{1,2}-\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?", text)
-    if not match:
-        return None
+    if match:
+        value = match.group(0)
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
 
-    value = match.group(0)
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+    # Try MM-DD HH:MM format (without year), use current year
+    match = re.search(r"(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?", text)
+    if match:
+        month, day = int(match.group(1)), int(match.group(2))
+        hour, minute = 0, 0
+        if match.group(3):
+            hour, minute = int(match.group(3)), int(match.group(4))
         try:
-            return datetime.strptime(value, fmt)
+            current_year = datetime.now().year
+            return datetime(current_year, month, day, hour, minute)
         except ValueError:
-            continue
+            pass
+
     return None
 
 
