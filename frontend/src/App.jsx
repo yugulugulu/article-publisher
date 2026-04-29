@@ -307,7 +307,7 @@ function Header({ onLogout, onNavigateProfile }) {
 // Pages
 // ---------------------------------------------------------------------------
 
-function DashboardPage() {
+function DashboardPage({ onNavigateProfile }) {
   const { t } = useLanguage()
   const isGuest = getRole() === 'guest'
   const [status, setStatus] = useState(null)
@@ -470,10 +470,25 @@ function DashboardPage() {
 
   const lastResult = status?.last_result
   const workflow = status?.workflow || { metrics: {}, scheduler: {}, broadcast: {} }
+  const chainthink = workflow.chainthink || {}
+  const chainthinkTokenExpired = chainthink.status === 'expired'
 
   return (
     <div>
       <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 24 }}>{t('dashboard')}</h1>
+
+      {chainthinkTokenExpired && (
+        <div className="token-alert card">
+          <div>
+            <strong>{t('chainthinkTokenExpired')}</strong>
+            <p>{chainthink.error || t('chainthinkTokenExpiredHint')}</p>
+            {chainthink.error_at && <span>{chainthink.error_at}</span>}
+          </div>
+          {!isGuest && onNavigateProfile && (
+            <button className="btn btn-primary" onClick={onNavigateProfile}>{t('goUpdateToken')}</button>
+          )}
+        </div>
+      )}
 
       <div className="stats">
         <div className="stat">
@@ -1633,12 +1648,15 @@ function PromptPage() {
   const [saving, setSaving] = useState(false)
   const [rescoring, setRescoring] = useState(false)
   const [unscoredCount, setUnscoredCount] = useState(0)
+  const [dailyReport, setDailyReport] = useState({ enabled: false, available: false })
+  const [dailyTriggering, setDailyTriggering] = useState(false)
 
   const refreshWorkflow = useCallback(async () => {
     try {
-      const [settingsData, workflowData] = await Promise.all([
+      const [settingsData, workflowData, dailyReportData] = await Promise.all([
         api.getSettings(),
         api.getWorkflowStatus(),
+        api.getDailyReportStatus().catch(() => ({ enabled: false, available: false })),
       ])
       setAbstractPrompt(settingsData.prompt_abstract || '')
       setEditPrompt(settingsData.prompt_edit || '')
@@ -1646,6 +1664,7 @@ function PromptPage() {
       setOptimizePrompt(settingsData.prompt_optimize || '')
       setSettingsForm(buildWorkflowSettingsForm(settingsData))
       setWorkflow(workflowData || { metrics: {}, scheduler: { history: [] }, broadcast: {} })
+      setDailyReport(dailyReportData || { enabled: false, available: false })
     } catch (e) {
       console.error(e)
     } finally {
@@ -1654,7 +1673,7 @@ function PromptPage() {
   }, [])
 
   const handleRescoreUnscored = async () => {
-    const confirmMsg = '批量重新评分 4月17日及之后的未评分文章？\n' +
+    const confirmMsg = '批量重新评分 未评分文章？\n' +
       '- 70+ 分的文章会自动保存为 CMS 草稿\n' +
       '- 如果启用 LLM 优化，会在保存前进行优化\n' +
       '- 75+ 分的文章将进入自动发布队列\n' +
@@ -1758,7 +1777,7 @@ function PromptPage() {
             <h2>数据管理</h2>
           </div>
           <p style={{ fontSize: 14, color: 'var(--text)', marginTop: 0, marginBottom: 12 }}>
-            重新评分 4月17日及之后未评分的文章，70+分自动保存草稿（如启用 LLM 优化会先优化），75+分进入自动发布队列（既保存草稿又自动发布）。
+            重新评分 未评分的文章，70+分自动保存草稿（如启用 LLM 优化会先优化），75+分进入自动发布队列（既保存草稿又自动发布）。
           </p>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
             <button
@@ -1766,7 +1785,7 @@ function PromptPage() {
               onClick={handleRescoreUnscored}
               disabled={rescoring}
             >
-              {rescoring ? '处理中...' : '批量重新评分 (4月17日起)'}
+              {rescoring ? '处理中...' : '批量重新评分'}
             </button>
           </div>
         </div>
@@ -1954,6 +1973,69 @@ function PromptPage() {
             ))}
           </div>
         )}
+      </div>
+
+      <div className="card" style={{ marginBottom: 20 }}>
+        <div className="card-header">
+          <h2>{t('dailyReportTitle')}</h2>
+          {!isGuest && (
+            <button className="btn btn-outline btn-sm" onClick={async () => {
+              setDailyTriggering(true)
+              try {
+                const result = await api.triggerDailyReport()
+                if (result.reason === 'published') {
+                  alert(`日报发布成功：${result.title} (CMS ${result.cms_id})`)
+                } else if (result.reason === 'not_found_yet') {
+                  alert('未检测到今日日报，稍后再试')
+                } else if (result.reason === 'already_published_today') {
+                  alert('今日日报已发布')
+                } else {
+                  alert(`结果：${result.reason}${result.error ? '\n' + result.error : ''}`)
+                }
+                refreshWorkflow()
+              } catch (e) { alert(e.message) }
+              finally { setDailyTriggering(false) }
+            }} disabled={dailyTriggering}>
+              {dailyTriggering ? t('dailyReportTriggering') : t('dailyReportTrigger')}
+            </button>
+          )}
+        </div>
+        <p className="workflow-subtitle" style={{ marginTop: 0, marginBottom: 16 }}>
+          {t('dailyReportSubtitle')}
+        </p>
+        <div className="workflow-grid">
+          <div className="settings-group">
+            <label>{t('dailyReportEnabled')}</label>
+            <label className="workflow-toggle">
+              <input
+                type="checkbox"
+                checked={dailyReport.enabled}
+                onChange={async (e) => {
+                  try {
+                    const result = await api.toggleDailyReport(e.target.checked)
+                    setDailyReport(prev => ({ ...prev, enabled: result.enabled }))
+                  } catch (err) { alert(err.message) }
+                }}
+                disabled={isGuest}
+              />
+              <span>{dailyReport.enabled ? '已开启' : '已关闭'}</span>
+            </label>
+          </div>
+          <div className="settings-group">
+            <label>{t('dailyReportLastPublished')}</label>
+            <span style={{ fontSize: 14, color: 'var(--text)' }}>
+              {dailyReport.last_published_at
+                ? new Date(dailyReport.last_published_at).toLocaleString()
+                : t('dailyReportNotPublished')}
+            </span>
+          </div>
+          <div className="settings-group">
+            <label>状态</label>
+            <span style={{ fontSize: 14, color: dailyReport.checking ? 'var(--warning)' : dailyReport.last_date ? 'var(--success)' : 'var(--text2)' }}>
+              {dailyReport.checking ? t('dailyReportChecking') : dailyReport.last_error ? `错误: ${dailyReport.last_error}` : dailyReport.last_date ? t('dailyReportPublished') : t('dailyReportIdle')}
+            </span>
+          </div>
+        </div>
       </div>
 
       <div className="card" style={{ marginBottom: 20 }}>
@@ -2377,6 +2459,35 @@ function ProfilePage({ onLogout }) {
     }
   }
 
+  // -- ChainThink token section --
+  const [chainthinkToken, setChainthinkToken] = useState('')
+  const [chainthinkTokenLoading, setChainthinkTokenLoading] = useState(true)
+  const [chainthinkTokenSaving, setChainthinkTokenSaving] = useState(false)
+
+  const loadChainthinkSettings = () => {
+    setChainthinkTokenLoading(true)
+    api.getSettings().then(data => {
+      setChainthinkToken(data.chainthink_token || '')
+    }).catch(console.error).finally(() => setChainthinkTokenLoading(false))
+  }
+
+  useEffect(() => { loadChainthinkSettings() }, [])
+
+  const handleSaveChainthinkToken = async () => {
+    const token = chainthinkToken.trim()
+    if (!token || token.startsWith('*')) return
+    setChainthinkTokenSaving(true)
+    try {
+      await api.updateSettings({ chainthink_token: token })
+      loadChainthinkSettings()
+      alert(t('saveSuccess'))
+    } catch (e) {
+      alert(e.message)
+    } finally {
+      setChainthinkTokenSaving(false)
+    }
+  }
+
   // -- AI config section (multi-model) --
   const [llmTaskTab, setLlmTaskTab] = useState('abstract')
   const [llmTasks, setLlmTasks] = useState({})
@@ -2456,12 +2567,14 @@ function ProfilePage({ onLogout }) {
     }
   }
 
-  if (usernameLoading || llmLoading) return <div className="empty">{t('loading')}</div>
+  if (usernameLoading || llmLoading || chainthinkTokenLoading) return <div className="empty">{t('loading')}</div>
 
   return (
     <div className="settings-page">
       <h1>{t('userProfile')}</h1>
 
+      <div className="settings-grid">
+        <div className="settings-stack">
       {/* Username section */}
       <div className="card" style={{ marginBottom: 20 }}>
         <div className="card-header"><h2>{t('username')}</h2></div>
@@ -2512,6 +2625,34 @@ function ProfilePage({ onLogout }) {
           </div>
         </form>
       </div>)}
+
+      {!isGuest && (
+        <div className="card">
+          <div className="card-header"><h2>{t('chainthinkToken')}</h2></div>
+          <div className="settings-group">
+            <label>{t('chainthinkToken')}</label>
+            <input
+              type="password"
+              value={chainthinkToken}
+              onChange={e => setChainthinkToken(e.target.value)}
+              placeholder={t('chainthinkTokenPlaceholder')}
+            />
+            <div className="hint">{t('chainthinkTokenHint')}</div>
+          </div>
+          <div className="editor-actions" style={{ borderTop: 'none', paddingTop: 0 }}>
+            <button
+              className="btn btn-primary"
+              onClick={handleSaveChainthinkToken}
+              disabled={chainthinkTokenSaving || !chainthinkToken.trim() || chainthinkToken.trim().startsWith('*')}
+            >
+              {chainthinkTokenSaving ? '...' : t('save')}
+            </button>
+          </div>
+        </div>
+      )}
+        </div>
+
+        <div className="settings-stack settings-main-column">
 
       {/* AI Config section — multi-model tabs */}
       {!isGuest && (<div className="card">
@@ -2595,6 +2736,8 @@ function ProfilePage({ onLogout }) {
           </div>
         )}
       </div>)}
+        </div>
+      </div>
     </div>
   )
 }
@@ -3290,7 +3433,10 @@ function MainApp({ page, setPage, onLogout }) {
 
   const navItems = mode === 'ai' ? aiNav : blockchainNav
   const PageComponent = PAGES[page] || DashboardPage
-  const pageProps = page === 'profile' ? { onLogout } : {}
+  const pageProps = {
+    ...(page === 'profile' ? { onLogout } : {}),
+    onNavigateProfile: () => setPage('profile'),
+  }
 
   return (
     <div className="layout">

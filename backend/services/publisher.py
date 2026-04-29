@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from datetime import datetime
+from typing import Callable
 from urllib.parse import urlparse
 
 import requests
@@ -17,14 +18,53 @@ log = logging.getLogger("pipeline")
 INTERNAL_JUMP_DOMAINS = ("blockbeats", "odaily", "techflowpost", "foresightnews")
 
 
+class ChainThinkAuthError(RuntimeError):
+    """Raised when ChainThink rejects a request due to an expired/invalid token."""
+
+
+AUTH_FAILURE_TERMS = (
+    "token", "expired", "invalid", "unauthorized", "forbidden",
+    "登录", "未登录", "未授权", "无效", "过期", "请登录",
+)
+
+
+def is_chainthink_auth_failure(status_code: int, data) -> bool:
+    if status_code in (401, 403):
+        return True
+    text = str(data or "").lower()
+    if any(term in text for term in ("登录", "未登录", "未授权", "无效", "过期", "请登录")):
+        return True
+    return "token" in text and any(term in text for term in ("expired", "invalid", "unauthorized", "forbidden"))
+
+
+def parse_response_json(response):
+    try:
+        return response.json()
+    except ValueError:
+        return {"message": response.text[:200]}
+
+
 class Publisher:
     """Handles cover upload (via COSUploader) and CMS API publish."""
 
-    def __init__(self, api_url: str, api_headers: dict, cos_uploader: COSUploader, push_url: str = ""):
+    def __init__(
+        self,
+        api_url: str,
+        api_headers: dict,
+        cos_uploader: COSUploader,
+        push_url: str = "",
+        api_headers_provider: Callable[[], dict] | None = None,
+    ):
         self.api_url = api_url
         self.api_headers = api_headers
+        self.api_headers_provider = api_headers_provider
         self.cos = cos_uploader
         self.push_url = push_url
+
+    def _headers(self) -> dict:
+        if self.api_headers_provider:
+            return self.api_headers_provider()
+        return dict(self.api_headers or {})
 
     # -- HTML helpers --
 
@@ -216,11 +256,11 @@ class Publisher:
         }
         r = requests.post(
             self.api_url,
-            headers=self.api_headers,
+            headers=self._headers(),
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             timeout=30,
         )
-        data = r.json()
+        data = parse_response_json(r)
         if r.status_code == 200 and data.get("code") == 0:
             return {
                 "cms_id": data["data"]["id"],
@@ -228,6 +268,8 @@ class Publisher:
                 "cover_error": cover_error,
                 "publish_stage": "published" if is_public else "draft",
             }
+        if is_chainthink_auth_failure(r.status_code, data):
+            raise ChainThinkAuthError("ChainThink token expired or invalid")
         raise RuntimeError(f"publish failed: {r.status_code} {data}")
 
     def save_draft(self, article):
@@ -260,11 +302,13 @@ class Publisher:
         }
         r = requests.post(
             self.push_url,
-            headers=self.api_headers,
+            headers=self._headers(),
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             timeout=30,
         )
-        data = r.json()
+        data = parse_response_json(r)
         if r.status_code == 200 and data.get("code") == 0:
             return {"ok": True, "push_id": str(cms_id)}
+        if is_chainthink_auth_failure(r.status_code, data):
+            raise ChainThinkAuthError("ChainThink token expired or invalid")
         raise RuntimeError(f"push failed: {r.status_code} {data}")

@@ -16,7 +16,7 @@ from config.loader import load_config
 from pipelines import create_scrapers
 from services.article_store import ArticleStore
 from services.filter_service import FilterService
-from services.publisher import Publisher
+from services.publisher import ChainThinkAuthError, Publisher
 from services.push_scheduler import PushScheduler
 from services.auto_publish_scheduler import AutoPublishScheduler
 from services.daily_report import DailyReportScheduler
@@ -249,22 +249,31 @@ class PipelineService:
         # Build components
         scrapers = create_scrapers(cfg, session, base_dir, db=database)
 
-        api_headers = {
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json; charset=utf-8",
-            "Origin": "https://admin.chainthink.cn",
-            "Referer": "https://admin.chainthink.cn/",
-            "User-Agent": "Mozilla/5.0",
-            "x-token": cfg["chainthink"]["token"],
-            "x-user-id": str(cfg["chainthink"]["user_id"]),
-            "X-App-Id": str(cfg["chainthink"]["app_id"]),
-        }
+        def chainthink_headers_provider():
+            chainthink = cfg["chainthink"]
+            token = ""
+            if database:
+                token = database.get_setting("chainthink_token") or ""
+            token = token or chainthink.get("token", "")
+            return {
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json; charset=utf-8",
+                "Origin": "https://admin.chainthink.cn",
+                "Referer": "https://admin.chainthink.cn/",
+                "User-Agent": "Mozilla/5.0",
+                "x-token": token,
+                "x-user-id": str(chainthink.get("user_id", "")),
+                "X-App-Id": str(chainthink.get("app_id", "")),
+            }
+
+        api_headers = chainthink_headers_provider()
 
         cos = COSUploader(
             upload_url=cfg["chainthink"]["upload_url"],
             api_headers=api_headers,
             session=session,
             x_app_id=str(cfg["chainthink"].get("app_id", "")),
+            api_headers_provider=chainthink_headers_provider,
         )
 
         publisher = Publisher(
@@ -272,6 +281,7 @@ class PipelineService:
             api_headers=api_headers,
             cos_uploader=cos,
             push_url=cfg["chainthink"].get("push_url", ""),
+            api_headers_provider=chainthink_headers_provider,
         )
 
         article_store = ArticleStore(scrapers)
@@ -398,7 +408,41 @@ class PipelineService:
             "metrics": self.database.get_source_metrics(self.get_managed_source_keys()),
             "scheduler": self.auto_publish_scheduler.get_status() if self.auto_publish_scheduler else {},
             "broadcast": self.auto_publish_scheduler.get_broadcast_status() if self.auto_publish_scheduler else {},
+            "chainthink": self.get_chainthink_token_status(),
         }
+
+    def get_chainthink_token_status(self) -> dict:
+        """Return sanitized ChainThink token health for dashboard warnings."""
+        if not self.database:
+            return {"status": "unknown", "error": "", "error_at": "", "configured": False}
+        configured = bool(
+            self.database.get_setting("chainthink_token")
+            or self.cfg.get("chainthink", {}).get("token", "")
+        )
+        return {
+            "status": self.database.get_setting("chainthink_token_status") or "unknown",
+            "error": self.database.get_setting("chainthink_token_error") or "",
+            "error_at": self.database.get_setting("chainthink_token_error_at") or "",
+            "configured": configured,
+        }
+
+    def mark_chainthink_token_ok(self):
+        if not self.database:
+            return
+        self.database.set_settings_batch({
+            "chainthink_token_status": "ok",
+            "chainthink_token_error": "",
+            "chainthink_token_error_at": "",
+        })
+
+    def mark_chainthink_token_error(self, message: str):
+        if not self.database:
+            return
+        self.database.set_settings_batch({
+            "chainthink_token_status": "expired",
+            "chainthink_token_error": message,
+            "chainthink_token_error_at": datetime.now().isoformat(timespec="seconds"),
+        })
 
     def get_daily_report_status(self) -> dict:
         """Return daily report scheduler status."""
@@ -444,7 +488,12 @@ class PipelineService:
     def save_article_draft(self, article: dict, strategy: str = "manual") -> dict:
         """Create or update a CMS draft without making it public."""
         prepared = self._merge_database_article_fields(article)
-        result = self.publisher.save_draft(prepared)
+        try:
+            result = self.publisher.save_draft(prepared)
+        except ChainThinkAuthError as exc:
+            self.mark_chainthink_token_error(str(exc))
+            raise
+        self.mark_chainthink_token_ok()
         prepared["cms_id"] = result["cms_id"]
         prepared["publish_stage"] = "draft"
         if self.database:
@@ -454,7 +503,12 @@ class PipelineService:
     def publish_article(self, article: dict, strategy: str = "manual") -> dict:
         """Create or update a CMS article and make it public."""
         prepared = self._merge_database_article_fields(article)
-        result = self.publisher.publish(prepared)
+        try:
+            result = self.publisher.publish(prepared)
+        except ChainThinkAuthError as exc:
+            self.mark_chainthink_token_error(str(exc))
+            raise
+        self.mark_chainthink_token_ok()
         prepared["cms_id"] = result["cms_id"]
         prepared["publish_stage"] = "published"
 
@@ -477,11 +531,16 @@ class PipelineService:
         score = article.get("score") or 0
         push_label = self.get_push_label(score)
 
-        result = self.publisher.push_to_app(
-            cms_id=cms_id,
-            title=article.get("title", ""),
-            push_label=push_label,
-        )
+        try:
+            result = self.publisher.push_to_app(
+                cms_id=cms_id,
+                title=article.get("title", ""),
+                push_label=push_label,
+            )
+        except ChainThinkAuthError as exc:
+            self.mark_chainthink_token_error(str(exc))
+            raise
+        self.mark_chainthink_token_ok()
 
         if self.database:
             self.database.mark_broadcasted(article["article_id"], strategy=strategy)
@@ -510,7 +569,12 @@ class PipelineService:
         existing_cms_id = prepared.get("cms_id", "")
 
         # Step 1: Publish to CMS
-        pub_result = self.publisher.publish(prepared)
+        try:
+            pub_result = self.publisher.publish(prepared)
+        except ChainThinkAuthError as exc:
+            self.mark_chainthink_token_error(str(exc))
+            raise
+        self.mark_chainthink_token_ok()
         cms_id = pub_result["cms_id"]
 
         # Check if CMS created a duplicate article
@@ -538,12 +602,17 @@ class PipelineService:
         self.save_state(state)
 
         # Step 2: Broadcast to App
-        push_result = self.publisher.push_to_app(
-            cms_id=cms_id,
-            title=article.get("title", ""),
-            push_label=push_label or self.get_push_label(prepared.get("score")),
-            push_content=push_content,
-        )
+        try:
+            push_result = self.publisher.push_to_app(
+                cms_id=cms_id,
+                title=article.get("title", ""),
+                push_label=push_label or self.get_push_label(prepared.get("score")),
+                push_content=push_content,
+            )
+        except ChainThinkAuthError as exc:
+            self.mark_chainthink_token_error(str(exc))
+            raise
+        self.mark_chainthink_token_ok()
 
         if self.database:
             self.database.mark_broadcasted(prepared["article_id"], strategy="auto")

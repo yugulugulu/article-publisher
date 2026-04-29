@@ -1127,7 +1127,29 @@ tr:hover td { background: var(--surface2); }
    Settings Page
    ========================================================================= */
 .settings-page {
-  max-width: 600px;
+  max-width: 1100px;
+  width: 100%;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.settings-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.settings-stack .card {
+  margin-bottom: 0;
+}
+
+.settings-main-column {
+  min-width: 0;
 }
 
 .settings-page h1 {
@@ -1172,6 +1194,45 @@ tr:hover td { background: var(--surface2); }
   font-size: 12px;
   color: var(--text3);
   margin-top: 4px;
+}
+
+.token-alert {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  border-color: rgba(239, 68, 68, 0.45);
+  background: var(--danger-bg);
+}
+
+.token-alert strong {
+  display: block;
+  color: var(--danger);
+  font-size: 15px;
+  margin-bottom: 4px;
+}
+
+.token-alert p {
+  color: var(--text);
+  font-size: 14px;
+  margin: 0;
+}
+
+.token-alert span {
+  display: block;
+  color: var(--text2);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+@media (max-width: 900px) {
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .token-alert {
+    flex-direction: column;
+  }
 }
 
 /* =========================================================================

@@ -28,14 +28,43 @@ class SettingsUpdate(BaseModel):
     settings: dict
 
 
+def is_sensitive_setting(key: str) -> bool:
+    lowered = (key or "").lower()
+    return any(token in lowered for token in ("api_key", "token", "secret", "password"))
+
+
+def mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    text = str(value)
+    if len(text) <= 4:
+        return "****"
+    return f"********{text[-4:]}"
+
+
+def filter_settings_update(settings: dict) -> dict:
+    filtered = {}
+    for key, value in (settings or {}).items():
+        if is_sensitive_setting(key):
+            if value is None:
+                continue
+            text = str(value).strip()
+            if not text or text.startswith("*"):
+                continue
+            filtered[key] = text
+        else:
+            filtered[key] = value
+    return filtered
+
+
 @router.get("/settings")
 def get_settings():
-    """Get all settings (API key masked)."""
+    """Get all settings (sensitive values masked)."""
     raw = _db.get_all_settings()
     result = {}
     for k, v in raw.items():
-        if "api_key" in k and v and len(v) > 4:
-            result[k] = "*" * (len(v) - 4) + v[-4:]
+        if is_sensitive_setting(k):
+            result[k] = mask_secret(v)
         else:
             result[k] = v
     return result
@@ -59,7 +88,9 @@ def get_llm_tasks():
 @router.put("/settings")
 def update_settings(req: SettingsUpdate, _admin=Depends(require_admin)):
     """Batch update settings."""
-    _db.set_settings_batch(req.settings)
+    updates = filter_settings_update(req.settings)
+    if updates:
+        _db.set_settings_batch(updates)
     return {"ok": True}
 
 

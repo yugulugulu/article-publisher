@@ -13,6 +13,7 @@ import os
 import re
 import tempfile
 from datetime import datetime, timezone
+from typing import Callable
 
 import requests
 import urllib3
@@ -25,11 +26,24 @@ log = logging.getLogger("pipeline")
 class COSUploader:
     """Uploads images to COS via ChainThink's upload API."""
 
-    def __init__(self, upload_url: str, api_headers: dict, session: requests.Session, x_app_id: str = ""):
+    def __init__(
+        self,
+        upload_url: str,
+        api_headers: dict,
+        session: requests.Session,
+        x_app_id: str = "",
+        api_headers_provider: Callable[[], dict] | None = None,
+    ):
         self.upload_url = upload_url
         self.api_headers = api_headers
+        self.api_headers_provider = api_headers_provider
         self.session = session
         self.x_app_id = x_app_id
+
+    def _headers(self) -> dict:
+        if self.api_headers_provider:
+            return self.api_headers_provider()
+        return dict(self.api_headers or {})
 
     # -- Credential request --
 
@@ -42,11 +56,14 @@ class COSUploader:
         }
         r = requests.post(
             self.upload_url,
-            headers=self.api_headers,
+            headers=self._headers(),
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             timeout=30,
         )
-        data = r.json()
+        try:
+            data = r.json()
+        except ValueError:
+            data = {"message": r.text[:200]}
         if r.status_code == 200 and data.get("code") == 0:
             upload_data = data["data"]
             key_data = upload_data.get("key", {})
@@ -57,6 +74,9 @@ class COSUploader:
                         merged[k] = v
                 return merged
             return upload_data
+        from services.publisher import ChainThinkAuthError, is_chainthink_auth_failure
+        if is_chainthink_auth_failure(r.status_code, data):
+            raise ChainThinkAuthError("ChainThink token expired or invalid")
         raise RuntimeError(f"cover upload request failed: {r.status_code} {data}")
 
     # -- COS auth (signs content-length;host) --
@@ -160,6 +180,76 @@ class COSUploader:
         if r.status_code != 200:
             raise RuntimeError(f"cos put failed: {r.status_code}")
         return url
+
+    # -- High-level: upload image from local file --
+
+    def upload_cover_from_file(self, file_path, referer=""):
+        """Upload a cover image from a local file path to COS."""
+        file_path = str(file_path)
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        with open(file_path, "rb") as f:
+            content = f.read()
+
+        ext = "png" if file_path.lower().endswith(".png") else (
+            "webp" if file_path.lower().endswith(".webp") else "jpg"
+        )
+
+        file_hash = compute_crc64_file(file_path)
+        upload = self.request_upload(f"cover.{ext}", file_hash, use_pre_sign_url=True)
+        file_info = upload.get("file_info", {})
+        confirm_url = file_info.get("confirm_url") or upload.get("confirm_url") or ""
+        if confirm_url:
+            return confirm_url
+
+        key_data = upload.get("key", {})
+        if key_data:
+            for k, v in key_data.items():
+                if v not in (None, "", []):
+                    upload[k] = v
+            file_info = upload.get("file_info", {})
+
+        has_cos = bool(
+            upload.get("pre_sign_url")
+            or (
+                upload.get("access_key_id")
+                and upload.get("access_key_secret")
+                and upload.get("security_token")
+                and upload.get("bucket_name")
+                and upload.get("region")
+                and upload.get("expiration")
+            )
+        )
+        uploaded = False
+        if has_cos:
+            self.put_file_to_cos(upload, content)
+            uploaded = True
+
+        object_key = (
+            file_info.get("object")
+            or file_info.get("object_key")
+            or upload.get("object")
+            or upload.get("object_key")
+            or ""
+        )
+        confirm_url = file_info.get("confirm_url") or upload.get("confirm_url") or ""
+        if confirm_url:
+            return confirm_url
+        if uploaded and object_key:
+            try:
+                cu = self.request_upload(f"cover.{ext}", file_hash, use_pre_sign_url=False, confirm=True)
+                cu_url = cu.get("file_info", {}).get("confirm_url") or cu.get("confirm_url") or ""
+                if cu_url:
+                    return cu_url
+            except Exception:
+                pass
+        domain = file_info.get("domain") or upload.get("domain") or "https://cos.chainthink.cn"
+        if object_key:
+            return f"{domain.rstrip('/')}/{object_key.lstrip('/')}"
+        rh = file_info.get("hash") or upload.get("hash") or file_hash
+        re_ = file_info.get("ext") or upload.get("ext") or ext
+        return f"https://cos.chainthink.cn/{self.x_app_id}_admin_file/{rh}/{rh}.{re_}"
 
     # -- High-level: upload image from URL --
 
