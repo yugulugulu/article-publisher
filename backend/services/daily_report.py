@@ -183,6 +183,8 @@ class DailyReportScheduler:
                 push_label=push_label,
                 push_content=push_content,
                 window_start=datetime.now().replace(hour=DAILY_REPORT_START_HOUR, minute=0, second=0, microsecond=0),
+                strategy="daily_report",
+                record_window_quota=False,
             )
             cms_id = result.get("cms_id", "")
             log.info(

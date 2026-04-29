@@ -556,7 +556,15 @@ class PipelineService:
 
         return result
 
-    def auto_publish_and_broadcast(self, article: dict, push_label: str = "", window_start: datetime | None = None, push_content: str = "") -> dict:
+    def auto_publish_and_broadcast(
+        self,
+        article: dict,
+        push_label: str = "",
+        window_start: datetime | None = None,
+        push_content: str = "",
+        strategy: str = "auto",
+        record_window_quota: bool = True,
+    ) -> dict:
         """Atomic: publish article to CMS then broadcast to App.
 
         Used by AutoPublishScheduler for the unified publish+push flow.
@@ -593,7 +601,7 @@ class PipelineService:
         prepared["publish_stage"] = "published"
 
         if self.database:
-            self.database.mark_published(prepared["article_id"], cms_id, strategy="auto")
+            self.database.mark_published(prepared["article_id"], cms_id, strategy=strategy)
 
         state = self.load_state()
         published_ids = set(state.get("published_ids", []))
@@ -615,28 +623,29 @@ class PipelineService:
         self.mark_chainthink_token_ok()
 
         if self.database:
-            self.database.mark_broadcasted(prepared["article_id"], strategy="auto")
+            self.database.mark_broadcasted(prepared["article_id"], strategy=strategy)
             self.database.record_broadcast_history(
                 article_id=prepared["article_id"],
                 source_key=prepared.get("source_key", ""),
                 cms_id=cms_id,
                 push_title=push_label or self.get_push_label(prepared.get("score")) or (article.get("title", "") or "")[:120],
                 score=prepared.get("score"),
-                strategy="auto",
+                strategy=strategy,
                 result="ok",
             )
-            # Also record in push_history for window dedup
-            if window_start is None:
-                now = datetime.now()
-                window_start = self.auto_publish_scheduler._window_start(now) if self.auto_publish_scheduler else now
-            self.database.record_push_history(
-                article_id=prepared["article_id"],
-                source_key=prepared.get("source_key", ""),
-                score=prepared.get("score"),
-                cms_id=cms_id,
-                window_start=window_start,
-                strategy="auto",
-            )
+            # Normal auto-publish records push_history for window quota/dedup.
+            if record_window_quota:
+                if window_start is None:
+                    now = datetime.now()
+                    window_start = self.auto_publish_scheduler._window_start(now) if self.auto_publish_scheduler else now
+                self.database.record_push_history(
+                    article_id=prepared["article_id"],
+                    source_key=prepared.get("source_key", ""),
+                    score=prepared.get("score"),
+                    cms_id=cms_id,
+                    window_start=window_start,
+                    strategy=strategy,
+                )
 
         return {"cms_id": cms_id, "push": push_result}
 
