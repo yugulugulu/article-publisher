@@ -197,7 +197,24 @@ def fetch_website_articles(limit: int = 10, url: str = "https://chainthink.cn/zh
             if not title or len(title) <= 5 or title in seen_titles:
                 continue
 
-            container = h3.find_parent("article") or h3.find_parent("li") or h3.find_parent("div") or h3
+            # Find container that has both title and time
+            # Walk up from h3 until we find a container with a time element
+            container = None
+            current = h3
+            for _ in range(6):
+                current = current.find_parent()
+                if not current:
+                    break
+                # Check if this container has a time element
+                raw_time, parsed_time = _extract_website_time(current)
+                if raw_time:
+                    container = current
+                    break
+
+            # Fallback: use closest parent if no time found
+            if not container:
+                container = h3.find_parent("article") or h3.find_parent("li") or h3.find_parent("div") or h3
+
             raw_time, parsed_time = _extract_website_time(container)
             articles.append({
                 "title": title,
