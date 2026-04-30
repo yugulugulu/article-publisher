@@ -90,8 +90,8 @@ class AutoPublishScheduler:
         if is_morning:
             # Morning window: any >= 75 triggers publish
             min_score = HOT_THRESHOLD
-        else:
-            # Normal window: try >= 85 first
+        elif self._is_wait_for_high_score_enabled():
+            # Normal window with wait-for-high logic: try >= 85 first
             high_candidates = self.database.get_auto_publish_broadcast_candidates(
                 min_score=EXPLOSIVE_THRESHOLD,
                 limit=max(10, max_per_window * 10),
@@ -120,6 +120,9 @@ class AutoPublishScheduler:
                 }
 
             # Window is closing — fallback to highest >= 75
+            min_score = HOT_THRESHOLD
+        else:
+            # Wait-for-high disabled: any >= 75 triggers publish immediately
             min_score = HOT_THRESHOLD
 
         # Query candidates with determined min_score
@@ -529,6 +532,11 @@ class AutoPublishScheduler:
 
     def _is_enabled(self) -> bool:
         raw = (self.database.get_setting("push_enabled") or "1").strip().lower()
+        return raw not in {"0", "false", "off", "no"}
+
+    def _is_wait_for_high_score_enabled(self) -> bool:
+        """If True, normal windows wait for >=85 articles before falling back to >=75."""
+        raw = (self.database.get_setting("push_wait_for_high_score") or "1").strip().lower()
         return raw not in {"0", "false", "off", "no"}
 
     def _get_auto_sources(self) -> set[str]:
