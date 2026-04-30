@@ -128,8 +128,13 @@ def _parse_website_article_time(raw: str) -> datetime | None:
 
 
 def _extract_website_time(container) -> tuple[str, datetime | None]:
-    time_tag = container.find("time") if container else None
     candidates: list[str] = []
+
+    if not container:
+        return "", None
+
+    # Method 1: Try old <time> tag format
+    time_tag = container.find("time")
     if time_tag:
         candidates.extend([
             time_tag.get("datetime", ""),
@@ -137,9 +142,18 @@ def _extract_website_time(container) -> tuple[str, datetime | None]:
             time_tag.get_text(" ", strip=True),
         ])
 
-    if container:
-        text = container.get_text(" ", strip=True)
-        candidates.extend(re.findall(r"\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?\s*\d{1,2}:\d{2}(?::\d{2})?", text))
+    # Method 2: Look for <p> tags with time-like text (new Next.js format)
+    # Format: <p class="text-[12px]">04-30 16:36</p>
+    for p in container.find_all("p"):
+        p_text = p.get_text(" ", strip=True)
+        # Match MM-DD HH:MM format
+        if re.match(r"^\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}$", p_text):
+            candidates.append(p_text)
+
+    # Method 3: Scan all text for date patterns
+    text = container.get_text(" ", strip=True)
+    candidates.extend(re.findall(r"\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?\s*\d{1,2}:\d{2}(?::\d{2})?", text))
+    candidates.extend(re.findall(r"\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}", text))
 
     for raw in candidates:
         parsed = _parse_website_article_time(raw)

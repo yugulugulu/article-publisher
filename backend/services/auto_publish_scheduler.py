@@ -500,8 +500,9 @@ class AutoPublishScheduler:
         return raw if raw not in {None, ""} else default
 
     def _is_in_site_check_enabled(self) -> bool:
+        # Default enabled for 30-min interval checking
         raw = (self.database.get_setting("push_in_site_check_enabled") or "1").strip().lower()
-        return raw not in {"0", "false", "off", "no"}
+        return raw in {"1", "true", "on", "yes"}
 
     def _is_in_site_check_strict(self) -> bool:
         raw = (self.database.get_setting("push_in_site_check_strict") or "1").strip().lower()
