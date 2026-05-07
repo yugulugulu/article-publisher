@@ -140,6 +140,50 @@ class AutoPublishScheduler:
             candidates, window_start, auto_sources, is_fallback=not is_morning
         )
 
+    def _check_duplicate_via_keywords_and_semantic(self, article: dict) -> bool:
+        """Check if article duplicates recently published ones via keywords + LLM."""
+        if not article.get("title"):
+            return False
+
+        # Get keywords from article (extract if not present)
+        keywords = article.get("keywords") or []
+        if not keywords:
+            from services.scorer import ScorerService
+            keywords = ScorerService._extract_keywords(article)
+
+        if not keywords:
+            return False
+
+        # Find recent published articles with overlapping keywords
+        overlap_candidates = self.database.find_recent_by_keyword_overlap(
+            keywords,
+            days=7,
+            min_overlap=2,
+            limit=6,
+            exclude_article_id=article.get("article_id"),
+        )
+
+        if not overlap_candidates:
+            return False
+
+        log.info(
+            "[AutoPublish] Found %d keyword-overlap candidates for '%s': %s",
+            len(overlap_candidates),
+            article.get("title", "")[:40],
+            [c.get("title", "")[:20] for c in overlap_candidates],
+        )
+
+        # Use enhanced semantic dedup with candidate articles (title + abstract)
+        from services.llm import semantic_dedup
+
+        return semantic_dedup(
+            title=article.get("title", ""),
+            recent_titles=[],
+            db=self.database,
+            abstract=article.get("abstract", ""),
+            candidate_articles=overlap_candidates,
+        )
+
     def _try_publish_candidates(
         self,
         candidates: list[dict],
@@ -149,7 +193,6 @@ class AutoPublishScheduler:
         is_fallback: bool = False,
     ) -> dict:
         """Try candidates in order: dedup → exclude → in-site interval → publish + broadcast."""
-        recent_titles = self.database.get_recent_auto_publish_broadcast_titles(limit=6)
         in_site_articles = []
         in_site_fetch_failed = False
         if self._is_in_site_check_enabled():
@@ -177,14 +220,12 @@ class AutoPublishScheduler:
                 self._record_auto_skip(chosen, window_start)
                 continue
 
-            if recent_titles:
-                from services.llm import semantic_dedup
-
-                is_dup = semantic_dedup(title, recent_titles, self.database)
-                if is_dup:
-                    log.info("AutoPublishScheduler skip %s: semantic duplicate", chosen["article_id"])
-                    self._record_auto_skip(chosen, window_start)
-                    continue
+            # Enhanced dedup: keyword overlap + semantic (title + abstract)
+            is_dup = self._check_duplicate_via_keywords_and_semantic(chosen)
+            if is_dup:
+                log.info("AutoPublishScheduler skip %s: keyword+semantic duplicate", chosen["article_id"])
+                self._record_auto_skip(chosen, window_start)
+                continue
 
             if self._is_in_site_check_enabled():
                 if in_site_fetch_failed:
@@ -537,7 +578,7 @@ class AutoPublishScheduler:
 
     def _is_wait_for_high_score_enabled(self) -> bool:
         """If True, normal windows wait for >=85 articles before falling back to >=75."""
-        raw = (self.database.get_setting("push_wait_for_high_score") or "1").strip().lower()
+        raw = (self.database.get_setting("push_wait_for_high_score") or "0").strip().lower()
         return raw not in {"0", "false", "off", "no"}
 
     def _get_auto_sources(self) -> set[str]:

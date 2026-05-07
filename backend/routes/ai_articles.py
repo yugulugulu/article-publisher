@@ -228,10 +228,42 @@ def publish_ai_article(request: Request, article_id: str, _admin=Depends(require
         raise HTTPException(404, "Article not found")
 
     pipeline_svc = request.app.state.pipeline_service
+
+    # Check for potential duplicates before manual publish (warning only)
+    duplicate_warning = None
+    if pipeline_svc.database and article.get("title"):
+        try:
+            from services.scorer import ScorerService
+            keywords = article.get("keywords") or ScorerService._extract_keywords(article)
+            if keywords:
+                overlap_candidates = pipeline_svc.database.find_recent_by_keyword_overlap(
+                    keywords,
+                    days=7,
+                    min_overlap=2,
+                    limit=3,
+                    exclude_article_id=article_id,
+                )
+                if overlap_candidates:
+                    duplicate_warning = {
+                        "message": f"检测到 {len(overlap_candidates)} 篇相似已发布文章",
+                        "duplicates": [
+                            {
+                                "title": c.get("title", ""),
+                                "published_at": c.get("published_at", ""),
+                            }
+                            for c in overlap_candidates
+                        ],
+                    }
+        except Exception:
+            pass
+
     try:
         result = pipeline_svc.publish_article(article, strategy="manual")
         if result:
-            return {"status": "ok", "cms_id": result.get("cms_id", ""), "publish_stage": "published"}
+            response = {"status": "ok", "cms_id": result.get("cms_id", ""), "publish_stage": "published"}
+            if duplicate_warning:
+                response["duplicate_warning"] = duplicate_warning
+            return response
         raise HTTPException(500, "Publish returned no result")
     except Exception as e:
         raise HTTPException(500, str(e))

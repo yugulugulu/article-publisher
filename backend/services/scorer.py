@@ -79,13 +79,124 @@ AI_KEYWORDS = {
 
 
 class ScorerService:
-    """Generate deterministic article scores and publishing lanes."""
+    """Generate article scores. Uses LLM when prompt_score is configured, otherwise deterministic."""
 
     def __init__(self, database: ArticleDatabase):
         self.database = database
 
     def score_article(self, article: dict) -> dict:
-        """Score a single article and compute the downstream decision."""
+        """Score a single article. Tries LLM when prompt_score is configured."""
+        llm_result = self._score_with_llm(article)
+        if llm_result is not None:
+            return llm_result
+        return self._score_deterministic(article)
+
+    def _score_with_llm(self, article: dict) -> dict | None:
+        """Score using LLM with custom prompt_score rules. Returns None if not configured."""
+        custom_prompt = (self.database.get_setting("prompt_score") or "").strip()
+        if not custom_prompt:
+            return None
+
+        title = (article.get("title") or "").strip()
+        content_length = self._content_length(article)
+        source_key = article.get("source_key", "")
+        article_id = article.get("article_id", "")
+
+        # Build content preview (truncate to avoid token overflow)
+        content_text = "\n".join(
+            b.get("text", "").strip()
+            for b in article.get("blocks", [])
+            if b.get("type") != "img" and b.get("text")
+        )
+        if len(content_text) > 3000:
+            content_text = content_text[:3000] + "...(内容过长已截断)"
+
+        system_prompt = (
+            f"{custom_prompt}\n\n"
+            "【输出格式要求】\n"
+            "你必须返回纯 JSON（不要包含 markdown 代码块标记），格式如下：\n"
+            '{"score": <0-100的整数>, "reason": "<评分理由，包含加减分明细>", '
+            '"tags": ["<标签1>", "<标签2>"], "article_category": "<ai/blockchain/mixed/other>", '
+            '"keywords": ["<关键实体1>", "<关键实体2>"]}\n\n'
+            "article_category 规则：根据标题和内容判断属于 ai / blockchain / mixed / other 哪一类。\n"
+            "keywords 规则：从标题中提取 3-5 个最核心的关键实体或短语，用于文章去重。"
+            "例如标题「贝莱德比特币现货ETF获SEC批准」应提取 [\"贝莱德\",\"比特币\",\"现货ETF\",\"SEC\",\"批准\"]。"
+            "只提取有区分度的实体名称和关键动作，不要提取虚词或通用词。"
+        )
+
+        user_message = (
+            f"文章标题：{title}\n"
+            f"来源：{source_key}\n"
+            f"正文长度：{content_length}字\n"
+            f"正文内容：\n{content_text}"
+        )
+
+        import time as _time
+        max_retries = 3
+        retry_delays = [10, 20, 30]
+        last_error = None
+
+        for attempt in range(1 + max_retries):
+            try:
+                from services.llm_service import LLMService
+                svc = LLMService(self.database)
+                response = svc.chat("score", system_prompt, user_message,
+                                    max_tokens=1024, temperature=0.1)
+                if not response:
+                    raise ValueError("LLM returned empty response")
+
+                match = re.search(r'\{[\s\S]*\}', response)
+                if not match:
+                    raise ValueError("LLM response is not valid JSON")
+
+                data = json.loads(match.group(0))
+                score = int(data.get("score", 60))
+                score = max(0, min(100, score))
+
+                article_category = data.get("article_category", "") or self._detect_article_category(article)
+                tags = data.get("tags", [])[:5]
+                keywords = data.get("keywords", [])[:5]
+
+                review_status, auto_publish_enabled = self.decide_review_status(source_key, score)
+
+                log.info("[Scorer] LLM scoring success: aid=%s, score=%d", article_id, score)
+
+                return {
+                    "score": score,
+                    "reason": data.get("reason", ""),
+                    "tags": tags,
+                    "keywords": keywords,
+                    "review_status": review_status,
+                    "auto_publish_enabled": auto_publish_enabled,
+                    "raw_response": response,
+                    "article_category": article_category,
+                }
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    delay = retry_delays[attempt]
+                    log.warning("[Scorer] LLM scoring attempt %d/%d failed for %s, retrying in %ds: %s",
+                                attempt + 1, 1 + max_retries, article_id, delay, e)
+                    _time.sleep(delay)
+
+        # All retries exhausted — default 60, manual review
+        log.warning("[Scorer] LLM scoring failed after %d attempts for %s: %s. Defaulting to 60.",
+                    1 + max_retries, article_id, last_error)
+        article_category = self._detect_article_category(article)
+        keywords = self._extract_keywords(article)
+        return {
+            "score": 60,
+            "reason": f"LLM 评分失败，默认 60 分待人工审核（错误：{last_error}）",
+            "tags": [],
+            "keywords": keywords,
+            "review_status": "manual_review",
+            "auto_publish_enabled": False,
+            "raw_response": "",
+            "article_category": article_category,
+        }
+
+    def _score_deterministic(self, article: dict) -> dict:
+        """Deterministic keyword-based scoring (original logic)."""
         title = (article.get("title") or "").strip()
         title_lower = title.lower()
         content_length = self._content_length(article)
@@ -129,11 +240,13 @@ class ScorerService:
 
         tags = self._build_tags(matched_categories, article_category)
         reason = self._build_reason(score, matched_categories, length_penalty, content_length)
+        keywords = self._extract_keywords(article, matched_categories)
 
         return {
             "score": score,
             "reason": reason,
             "tags": tags,
+            "keywords": keywords,
             "review_status": review_status,
             "auto_publish_enabled": auto_publish_enabled,
             "raw_response": "",
@@ -205,6 +318,53 @@ class ScorerService:
         if article_category and article_category not in {"other", ""}:
             tags.append(article_category)
         return tags[:5]
+
+    @staticmethod
+    def _extract_keywords(
+        article: dict,
+        matched_categories: list[tuple[int, int, list[str]]] | None = None,
+    ) -> list[str]:
+        """Extract key entities from title for dedup (rule-based fallback)."""
+        title = (article.get("title") or "").strip()
+        if not title:
+            return []
+
+        keywords: list[str] = []
+        seen: set[str] = set()
+
+        # 1. Use matched scorer keywords (specific entities like 贝莱德, ETF, SEC etc.)
+        if matched_categories:
+            for _, _, matches in matched_categories:
+                for m in matches:
+                    if m.lower() not in seen:
+                        keywords.append(m)
+                        seen.add(m.lower())
+
+        # 2. Extract English words and numbers
+        for m in re.finditer(r'[a-zA-Z]{2,}|\d+(?:\.\d+)?', title):
+            token = m.group(0)
+            if token.lower() not in seen:
+                keywords.append(token)
+                seen.add(token.lower())
+
+        # 3. Extract Chinese segments using scorer keyword lists as dictionary
+        all_kw_lists = (CATEGORY_3_KEYWORDS, CATEGORY_4_KEYWORDS, CATEGORY_5_KEYWORDS,
+                        CATEGORY_2_KEYWORDS, CATEGORY_1_KEYWORDS)
+        for kw_list in all_kw_lists:
+            for kw in kw_list:
+                if kw in title and kw.lower() not in seen:
+                    keywords.append(kw)
+                    seen.add(kw.lower())
+
+        # 4. Chinese bigrams (2-char sliding window) for remaining text
+        chinese_chars = re.findall(r'[一-鿿]', title)
+        for i in range(len(chinese_chars) - 1):
+            bigram = chinese_chars[i] + chinese_chars[i + 1]
+            if bigram not in seen and not all(c in '的了是在不有和人这我他她它们着过到说得就会被从让给用' for c in bigram):
+                keywords.append(bigram)
+                seen.add(bigram)
+
+        return keywords[:8]
 
     @staticmethod
     def _unique_matches(

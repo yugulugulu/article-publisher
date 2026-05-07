@@ -267,7 +267,14 @@ def fetch_website_titles(limit: int = 6) -> list[str]:
         return []
 
 
-def semantic_dedup(title: str, recent_titles: list[str], db: ArticleDatabase, website_titles: list[str] | None = None) -> bool:
+def semantic_dedup(
+    title: str,
+    recent_titles: list[str],
+    db: ArticleDatabase,
+    website_titles: list[str] | None = None,
+    abstract: str | None = None,
+    candidate_articles: list[dict] | None = None,
+) -> bool:
     """Use LLM to check if *title* is semantically duplicate of any titles.
 
     Args:
@@ -275,10 +282,18 @@ def semantic_dedup(title: str, recent_titles: list[str], db: ArticleDatabase, we
         recent_titles: Recently published/broadcast titles from local DB
         db: ArticleDatabase instance
         website_titles: Optional titles from chainthink.cn website
+        abstract: Optional abstract of the new article for content comparison
+        candidate_articles: Optional list of dicts with 'title' and 'abstract'
+            for deeper content comparison. When provided, takes priority over
+            title-only comparison.
 
     Returns True if the title is considered a duplicate.
     """
-    # Combine all titles for dedup check
+    # Enhanced path: compare with both title and abstract
+    if candidate_articles:
+        return _semantic_dedup_with_content(title, abstract, candidate_articles, db)
+
+    # Legacy path: title-only comparison
     all_titles = list(recent_titles)
     if website_titles:
         all_titles.extend(website_titles)
@@ -302,7 +317,6 @@ def semantic_dedup(title: str, recent_titles: list[str], db: ArticleDatabase, we
 
     try:
         svc = _get_llm_service(db)
-        # Use score task's LLM for dedup
         response = svc.chat("score", prompt, title, max_tokens=256, temperature=0.1)
         if response:
             import re as _re
@@ -315,6 +329,71 @@ def semantic_dedup(title: str, recent_titles: list[str], db: ArticleDatabase, we
                 return is_dup
     except Exception as e:
         log.warning("[LLM] semantic_dedup failed, assuming not duplicate: %s", e)
+
+    return False
+
+
+def _semantic_dedup_with_content(
+    title: str,
+    abstract: str | None,
+    candidate_articles: list[dict],
+    db: ArticleDatabase,
+) -> bool:
+    """Compare article title+abstract against candidates using LLM."""
+    # Limit to top 6 candidates
+    candidates = candidate_articles[:6]
+    if not candidates:
+        return False
+
+    candidates_text = ""
+    for i, c in enumerate(candidates, 1):
+        c_title = c.get("title", "")
+        c_abstract = c.get("abstract", "") or ""
+        c_abstract_short = c_abstract[:150] if c_abstract else ""
+        overlap_info = ""
+        if c.get("overlap_keywords"):
+            overlap_info = f"  [重叠关键字: {', '.join(c['overlap_keywords'])}]"
+        candidates_text += f"{i}. 标题：{c_title}"
+        if c_abstract_short:
+            candidates_text += f"\n   摘要：{c_abstract_short}"
+        if overlap_info:
+            candidates_text += f"\n   {overlap_info}"
+        candidates_text += "\n"
+
+    new_article_text = f"新标题：{title}"
+    if abstract:
+        new_article_text += f"\n新摘要：{abstract[:150]}"
+
+    prompt = (
+        "你是一个新闻去重判断助手。判断以下新文章是否与已有文章中的任何一篇是"
+        "「同一篇报道的不同来源转载」或「高度雷同的改写」。\n"
+        "判断标准：\n"
+        "- 两篇标题不同但描述的是完全相同的事件且核心内容一致 → 重复\n"
+        "- 同一事件的转载、翻译、改写（仅换词不换意） → 重复\n"
+        "- 同一话题/事件但角度不同、内容有实质差异的独立报道 → 不重复\n"
+        "- 同一事件的不同阶段进展 → 不重复\n\n"
+        f"已有文章：\n{candidates_text}\n"
+        f"{new_article_text}\n\n"
+        "请只回答 JSON：{\"duplicate\": true, \"reason\": \"<简短说明>\"} 或 {\"duplicate\": false, \"reason\": \"<简短说明>\"}"
+    )
+
+    try:
+        svc = _get_llm_service(db)
+        response = svc.chat("score", prompt, title, max_tokens=256, temperature=0.1)
+        if response:
+            import re as _re
+            match = _re.search(r'\{[^}]+\}', response)
+            if match:
+                data = json.loads(match.group(0))
+                is_dup = bool(data.get("duplicate", False))
+                reason = data.get("reason", "")
+                if is_dup:
+                    log.info("[LLM] semantic dedup (content): '%s' is duplicate — %s", title[:50], reason)
+                else:
+                    log.info("[LLM] semantic dedup (content): '%s' is NOT duplicate — %s", title[:50], reason)
+                return is_dup
+    except Exception as e:
+        log.warning("[LLM] semantic_dedup_with_content failed, assuming not duplicate: %s", e)
 
     return False
 

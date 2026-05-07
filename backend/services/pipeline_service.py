@@ -176,6 +176,11 @@ class SourceScheduleState:
 # PipelineService
 # ---------------------------------------------------------------------------
 
+class _DedupDuplicate(Exception):
+    """Signal that an article was identified as a duplicate during ingestion."""
+    pass
+
+
 class PipelineService:
     """Main pipeline service: orchestrates scrapers, publisher, state."""
 
@@ -369,6 +374,7 @@ class PipelineService:
             auto_publish_enabled=score_result["auto_publish_enabled"],
             score_status="done",
             article_category=score_result.get("article_category"),
+            keywords=score_result.get("keywords"),
         )
 
         # Auto-save CMS draft for all articles scoring >= 70
@@ -377,8 +383,8 @@ class PipelineService:
         score = score_result["score"]
         if score is not None and score >= 70:
             # LLM 优化文章（如果启用）
-            enable_llm_optimization = self.database.get_setting("llm_optimization_enabled") == "true"
-            enable_author_info = self.database.get_setting("llm_author_info_enabled") == "true"
+            enable_llm_optimization = self.database.get_setting("llm_optimization_enabled") == "1"
+            enable_author_info = self.database.get_setting("llm_author_info_enabled") == "1"
             llm_optimize_prompt = self.database.get_setting("prompt_optimize") or ""
 
             if enable_llm_optimization:
@@ -410,6 +416,58 @@ class PipelineService:
             "broadcast": self.auto_publish_scheduler.get_broadcast_status() if self.auto_publish_scheduler else {},
             "chainthink": self.get_chainthink_token_status(),
         }
+
+    def _keyword_semantic_dedup(self, article: dict) -> bool:
+        """Check if article duplicates a recently published one via keyword overlap + LLM.
+
+        Raises an exception to signal the caller to skip this article (via continue).
+        """
+        if not self.database or not article.get("title"):
+            return False
+
+        # Extract keywords from the title for quick pre-filter
+        from services.scorer import ScorerService
+        keywords = ScorerService._extract_keywords(article)
+        if not keywords:
+            return False
+
+        overlap_candidates = self.database.find_recent_by_keyword_overlap(
+            keywords,
+            days=7,
+            min_overlap=2,
+            limit=6,
+            exclude_article_id=article.get("article_id"),
+        )
+
+        if not overlap_candidates:
+            return False
+
+        log.info(
+            "[Dedup] Found %d keyword-overlap candidates for '%s': %s",
+            len(overlap_candidates),
+            article.get("title", "")[:40],
+            [c.get("title", "")[:20] for c in overlap_candidates],
+        )
+
+        from services.llm import semantic_dedup
+
+        is_dup = semantic_dedup(
+            title=article.get("title", ""),
+            recent_titles=[],
+            db=self.database,
+            abstract=article.get("abstract", ""),
+            candidate_articles=overlap_candidates,
+        )
+
+        if is_dup:
+            log.info(
+                "Skip %s: keyword+semantic duplicate with '%s'",
+                article["article_id"],
+                overlap_candidates[0].get("title", "")[:40],
+            )
+            raise _DedupDuplicate(overlap_candidates[0].get("article_id", ""))
+
+        return False
 
     def get_chainthink_token_status(self) -> dict:
         """Return sanitized ChainThink token health for dashboard warnings."""
@@ -752,6 +810,16 @@ class PipelineService:
                                 continue
                         except Exception as e:
                             log.warning("Website semantic dedup check failed for %s: %s", article.get("article_id", ""), e)
+
+                    # Keyword + semantic dedup against recently published DB articles
+                    if self.database and article.get("title"):
+                        try:
+                            self._keyword_semantic_dedup(article)
+                        except _DedupDuplicate:
+                            log.info("Skip %s: keyword+semantic duplicate detected", article["article_id"])
+                            continue
+                        except Exception as e:
+                            log.warning("Keyword dedup check failed for %s: %s", article.get("article_id", ""), e)
 
                     scraper.save(article)
                     if self.database:

@@ -210,6 +210,7 @@ class ArticleDatabase:
             "ALTER TABLE push_history ADD COLUMN in_site_article_url TEXT",
             "ALTER TABLE push_history ADD COLUMN in_site_article_title TEXT",
             "ALTER TABLE push_history ADD COLUMN in_site_article_published_at TEXT",
+            "ALTER TABLE articles ADD COLUMN keywords TEXT",
         ]:
             try:
                 conn.execute(col_sql)
@@ -660,6 +661,7 @@ class ArticleDatabase:
         auto_publish_enabled: bool | None = None,
         score_status: str = "done",
         article_category: str | None = None,
+        keywords: list[str] | None = None,
     ) -> bool:
         """Persist scoring result and downstream review status."""
         conn = self._get_conn()
@@ -667,6 +669,9 @@ class ArticleDatabase:
         if tags is not None:
             sanitized_tags = [_sanitize_for_gbk(str(tag)) for tag in tags]
             tags_json = json.dumps(sanitized_tags, ensure_ascii=True)
+        keywords_json = None
+        if keywords is not None:
+            keywords_json = json.dumps(keywords, ensure_ascii=True)
 
         current = self.get_by_article_id(article_id) or {}
         cursor = conn.execute(
@@ -674,6 +679,7 @@ class ArticleDatabase:
             UPDATE articles
             SET score = ?,
                 tags = ?,
+                keywords = ?,
                 score_reason = ?,
                 score_status = ?,
                 review_status = ?,
@@ -686,6 +692,7 @@ class ArticleDatabase:
             (
                 score,
                 tags_json if tags is not None else current.get("tags_json"),
+                keywords_json,
                 _sanitize_for_gbk(score_reason),
                 score_status,
                 review_status or current.get("review_status", "manual_review"),
@@ -698,6 +705,106 @@ class ArticleDatabase:
         )
         conn.commit()
         return cursor.rowcount > 0
+
+    def update_keywords(self, article_id: str, keywords: list[str]) -> bool:
+        """Persist extracted keywords for dedup."""
+        conn = self._get_conn()
+        keywords_json = json.dumps(keywords, ensure_ascii=True) if keywords else None
+        cursor = conn.execute(
+            "UPDATE articles SET keywords = ?, updated_at = ? WHERE article_id = ?",
+            (keywords_json, datetime.now().isoformat(), article_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def find_recent_by_keyword_overlap(
+        self,
+        keywords: list[str],
+        days: int = 7,
+        min_overlap: int = 2,
+        limit: int = 10,
+        exclude_article_id: str | None = None,
+    ) -> list[dict]:
+        """Find recently published articles with keyword overlap.
+
+        Returns articles from the last `days` days whose stored keywords
+        share at least `min_overlap` entries with the given keywords.
+        """
+        if not keywords:
+            return []
+
+        conn = self._get_conn()
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+
+        rows = conn.execute(
+            """
+            SELECT article_id, title, abstract, keywords, source_key, published_at
+            FROM articles
+            WHERE keywords IS NOT NULL
+              AND keywords != ''
+              AND updated_at >= ?
+              AND article_id != ?
+            ORDER BY updated_at DESC
+            LIMIT 500
+            """,
+            (cutoff, exclude_article_id or ""),
+        ).fetchall()
+
+        results = []
+        keyword_set = {k.lower() for k in keywords}
+        for row in rows:
+            try:
+                row_kw = json.loads(row["keywords"]) if row["keywords"] else []
+            except (json.JSONDecodeError, TypeError):
+                continue
+            row_kw_set = {k.lower() for k in row_kw}
+            overlap = keyword_set & row_kw_set
+            if len(overlap) >= min_overlap:
+                results.append({
+                    "article_id": row["article_id"],
+                    "title": row["title"],
+                    "abstract": row["abstract"],
+                    "keywords": row_kw,
+                    "source_key": row["source_key"],
+                    "overlap_count": len(overlap),
+                    "overlap_keywords": sorted(overlap),
+                })
+
+        results.sort(key=lambda x: x["overlap_count"], reverse=True)
+        return results[:limit]
+
+    def get_recent_published_with_keywords(
+        self, days: int = 7, limit: int = 20
+    ) -> list[dict]:
+        """Return recently published/broadcasted articles with keywords and abstracts."""
+        conn = self._get_conn()
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        rows = conn.execute(
+            """
+            SELECT article_id, title, abstract, keywords, source_key
+            FROM articles
+            WHERE publish_stage IN ('published', 'broadcasted')
+              AND title IS NOT NULL AND title != ''
+              AND updated_at >= ?
+            ORDER BY COALESCE(broadcasted_at, published_at, updated_at) DESC
+            LIMIT ?
+            """,
+            (cutoff, limit),
+        ).fetchall()
+        results = []
+        for row in rows:
+            try:
+                kw = json.loads(row["keywords"]) if row["keywords"] else []
+            except (json.JSONDecodeError, TypeError):
+                kw = []
+            results.append({
+                "article_id": row["article_id"],
+                "title": row["title"],
+                "abstract": row["abstract"],
+                "keywords": kw,
+                "source_key": row["source_key"],
+            })
+        return results
 
     def update_review_status(
         self,
@@ -1594,6 +1701,9 @@ class ArticleDatabase:
         tags_raw = row["tags"] if "tags" in row.keys() else None
         article["tags"] = json.loads(tags_raw) if tags_raw else []
         article["tags_json"] = tags_raw
+
+        keywords_raw = row["keywords"] if "keywords" in row.keys() else None
+        article["keywords"] = json.loads(keywords_raw) if keywords_raw else []
 
         blocks_raw = row["blocks"] if "blocks" in row.keys() else None
         if blocks_raw:

@@ -366,9 +366,45 @@ def publish_article(request: Request, article_id: str, _admin=Depends(require_ad
     svc = request.app.state.pipeline_service
     article = _load_article_for_cms(request, article_id)
 
+    # Check for potential duplicates before manual publish (warning only)
+    duplicate_warning = None
+    if svc.database and article.get("title"):
+        try:
+            from services.scorer import ScorerService
+            keywords = article.get("keywords") or ScorerService._extract_keywords(article)
+            if keywords:
+                overlap_candidates = svc.database.find_recent_by_keyword_overlap(
+                    keywords,
+                    days=7,
+                    min_overlap=2,
+                    limit=3,
+                    exclude_article_id=article_id,
+                )
+                if overlap_candidates:
+                    duplicate_warning = {
+                        "message": f"检测到 {len(overlap_candidates)} 篇相似已发布文章",
+                        "duplicates": [
+                            {
+                                "title": c.get("title", ""),
+                                "published_at": c.get("published_at", ""),
+                            }
+                            for c in overlap_candidates
+                        ],
+                    }
+        except Exception as e:
+            pass  # Warning check failure should not block publish
+
     try:
         result = svc.publish_article(article, strategy="manual")
-        return {"ok": True, "cms_id": result["cms_id"], "title": article.get("title", ""), "publish_stage": "published"}
+        response = {
+            "ok": True,
+            "cms_id": result["cms_id"],
+            "title": article.get("title", ""),
+            "publish_stage": "published",
+        }
+        if duplicate_warning:
+            response["duplicate_warning"] = duplicate_warning
+        return response
     except Exception as e:
         raise HTTPException(502, f"发布失败: {str(e)[:200]}")
 

@@ -1207,7 +1207,12 @@ function ArticlesPage() {
   const handlePublish = async (articleId) => {
     try {
       const result = await api.publishArticle(articleId)
-      alert(t('publishSuccess') + ` (CMS ID: ${result.cms_id})`)
+      let message = t('publishSuccess') + ` (CMS ID: ${result.cms_id})`
+      if (result.duplicate_warning) {
+        const dup = result.duplicate_warning
+        message = `${dup.message}\n\n相似文章：\n${dup.duplicates.map(d => `- ${d.title}`).join('\n')}\n\n${t('publishSuccess')} (CMS ID: ${result.cms_id})`
+      }
+      alert(message)
       await refreshSelectedArticle(articleId)
     } catch (e) {
       alert(e.message)
@@ -2087,7 +2092,7 @@ function PromptPage() {
       <div className="card" style={{ marginBottom: 20 }}>
         <div className="card-header"><h2>评分与摘要 Prompt</h2></div>
         <p className="workflow-subtitle" style={{ marginTop: 0, marginBottom: 16 }}>
-          保存后下次运行就会直接使用新的 Prompt，不需要重启服务器。
+          保存后下次运行就会直接使用新的 Prompt，不需要重启服务器。如果 LLM 评分失败，文章默认 60 分进入人工审核队列。
         </p>
         <div className="settings-group">
           <label>评分 Prompt</label>
@@ -2846,7 +2851,12 @@ function AiArticlesPage() {
   const handlePublish = async (articleId) => {
     try {
       const result = await api.publishAiArticle(articleId)
-      alert(t('publishSuccess') + ` (CMS ID: ${result.cms_id})`)
+      let message = t('publishSuccess') + ` (CMS ID: ${result.cms_id})`
+      if (result.duplicate_warning) {
+        const dup = result.duplicate_warning
+        message = `${dup.message}\n\n相似文章：\n${dup.duplicates.map(d => `- ${d.title}`).join('\n')}\n\n${t('publishSuccess')} (CMS ID: ${result.cms_id})`
+      }
+      alert(message)
       await refreshSelectedArticle(articleId)
     } catch (e) {
       alert(e.message)
