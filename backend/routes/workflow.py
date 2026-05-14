@@ -141,10 +141,9 @@ def rescore_unscored_articles(request: Request, _admin=Depends(require_admin)):
                 article_category=score_result.get("article_category"),
             )
 
-            # Auto-save CMS draft for scores 70-74 (articles that won't be auto-published)
-            # Articles with score >= 75 will be handled by the auto-publish scheduler directly
+            # Auto-save CMS draft for scores >= 70
             score = score_result["score"]
-            if score is not None and 70 <= score < 75:
+            if score is not None and score >= 70:
                 # LLM 优化文章（如果启用）
                 if enable_llm_optimization:
                     try:

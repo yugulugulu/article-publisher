@@ -86,44 +86,8 @@ class AutoPublishScheduler:
         if pushed_in_window >= max_per_window:
             return {"ok": True, "reason": "window_full", "window_start": window_start.isoformat()}
 
-        # --- Determine candidates based on window type ---
-        if is_morning:
-            # Morning window: any >= 75 triggers publish
-            min_score = HOT_THRESHOLD
-        elif self._is_wait_for_high_score_enabled():
-            # Normal window with wait-for-high logic: try >= 85 first
-            high_candidates = self.database.get_auto_publish_broadcast_candidates(
-                min_score=EXPLOSIVE_THRESHOLD,
-                limit=max(10, max_per_window * 10),
-                source_keys=auto_sources,
-                window_start=window_start,
-                window_end=window_end,
-            )
-            if high_candidates:
-                # Found >= 85 article(s) — publish the best one
-                return self._try_publish_candidates(
-                    high_candidates, window_start, auto_sources
-                )
-
-            # No >= 85 candidates. Check if we're near window end for fallback.
-            now = datetime.now()
-            check_interval = self._get_int_setting("push_check_interval_minutes", 10)
-            remaining = (window_end - now).total_seconds() / 60
-
-            if remaining > check_interval:
-                # Still early in the window — wait for potential >= 85 article
-                return {
-                    "ok": True,
-                    "reason": "waiting_for_high_score",
-                    "window_start": window_start.isoformat(),
-                    "remaining_minutes": round(remaining, 1),
-                }
-
-            # Window is closing — fallback to highest >= 75
-            min_score = HOT_THRESHOLD
-        else:
-            # Wait-for-high disabled: any >= 75 triggers publish immediately
-            min_score = HOT_THRESHOLD
+        # --- All windows: score >= 75 triggers publish immediately ---
+        min_score = HOT_THRESHOLD
 
         # Query candidates with determined min_score
         candidates = self.database.get_auto_publish_broadcast_candidates(

@@ -257,9 +257,21 @@ class PipelineService:
         def chainthink_headers_provider():
             chainthink = cfg["chainthink"]
             token = ""
+            user_id = ""
+            app_id = ""
+            as_user_id = ""
             if database:
                 token = database.get_setting("chainthink_token") or ""
+                user_id = database.get_setting("chainthink_user_id") or ""
+                app_id = database.get_setting("chainthink_app_id") or ""
+                as_user_id = database.get_setting("chainthink_as_user_id") or ""
             token = token or chainthink.get("token", "")
+            user_id = user_id or str(chainthink.get("user_id", ""))
+            app_id = app_id or str(chainthink.get("app_id", ""))
+            as_user_id = as_user_id or str(chainthink.get("as_user_id", ""))
+            # as_user_id defaults to user_id if still not set
+            if not as_user_id:
+                as_user_id = user_id
             return {
                 "Accept": "application/json, text/plain, */*",
                 "Content-Type": "application/json; charset=utf-8",
@@ -267,19 +279,35 @@ class PipelineService:
                 "Referer": "https://admin.chainthink.cn/",
                 "User-Agent": "Mozilla/5.0",
                 "x-token": token,
-                "x-user-id": str(chainthink.get("user_id", "")),
-                "X-App-Id": str(chainthink.get("app_id", "")),
+                "x-user-id": user_id,
+                "X-App-Id": app_id,
             }
 
         api_headers = chainthink_headers_provider()
+
+        def chainthink_x_app_id_provider():
+            """Get the X-App-Id header value."""
+            if database:
+                app_id = database.get_setting("chainthink_app_id") or ""
+                if app_id:
+                    return app_id
+            return str(cfg["chainthink"].get("app_id", ""))
 
         cos = COSUploader(
             upload_url=cfg["chainthink"]["upload_url"],
             api_headers=api_headers,
             session=session,
-            x_app_id=str(cfg["chainthink"].get("app_id", "")),
+            x_app_id=chainthink_x_app_id_provider(),
             api_headers_provider=chainthink_headers_provider,
         )
+
+        def chainthink_user_id_provider():
+            """Get the user_id to use for article publishing (as_user_id in CMS payload)."""
+            if database:
+                as_user_id = database.get_setting("chainthink_as_user_id") or ""
+                if as_user_id:
+                    return as_user_id
+            return str(cfg["chainthink"].get("as_user_id", "") or cfg["chainthink"].get("user_id", "3"))
 
         publisher = Publisher(
             api_url=cfg["chainthink"]["api_url"],
@@ -287,6 +315,7 @@ class PipelineService:
             cos_uploader=cos,
             push_url=cfg["chainthink"].get("push_url", ""),
             api_headers_provider=chainthink_headers_provider,
+            user_id_provider=chainthink_user_id_provider,
         )
 
         article_store = ArticleStore(scrapers)
@@ -318,7 +347,7 @@ class PipelineService:
 
     def get_managed_source_keys(self) -> list[str]:
         """Return blockchain source keys handled by this service."""
-        return list(self.scrapers.keys())
+        return [key for key in self.scrapers.keys() if key != "manual"]
 
     def _canonical_article_id(self, source_key: str, article_or_id) -> str:
         if isinstance(article_or_id, dict):
@@ -377,9 +406,9 @@ class PipelineService:
             keywords=score_result.get("keywords"),
         )
 
-        # Auto-save CMS draft for all articles scoring >= 70
-        # Auto-publish scheduler will upgrade drafts to published when it picks them up,
-        # using the existing cms_id so no duplicate is created.
+        # Auto-save CMS draft for all articles scoring >= 70.
+        # Articles scoring >= 75 will be auto-published directly by AutoPublishScheduler.
+        # CMS API does NOT support upgrading a draft to published — it creates a duplicate.
         score = score_result["score"]
         if score is not None and score >= 70:
             # LLM 优化文章（如果启用）
@@ -629,10 +658,17 @@ class PipelineService:
         """
         prepared = self._merge_database_article_fields(article)
 
-        # If article is already a draft, we should update it to published instead of creating a new one
-        # The CMS API should handle this when we pass the existing cms_id
-        current_stage = prepared.get("publish_stage", "local")
-        existing_cms_id = prepared.get("cms_id", "")
+        # Clear any stale cms_id from a previous draft — CMS API creates a new article
+        # when publishing, even if an existing cms_id is provided, causing duplicates.
+        # Auto-published articles (>= 75) now skip draft save, so this is a safety net
+        # for any leftover drafts from earlier runs or manual draft saves.
+        if prepared.get("publish_stage") == "draft" and prepared.get("cms_id"):
+            log.warning(
+                "Auto-publish article %s has existing draft cms_id=%s — clearing to avoid CMS duplicate",
+                prepared.get("article_id"),
+                prepared["cms_id"],
+            )
+            prepared["cms_id"] = ""
 
         # Step 1: Publish to CMS
         try:
@@ -642,18 +678,6 @@ class PipelineService:
             raise
         self.mark_chainthink_token_ok()
         cms_id = pub_result["cms_id"]
-
-        # Check if CMS created a duplicate article
-        if current_stage == "draft" and existing_cms_id and str(cms_id) != str(existing_cms_id):
-            log.error(
-                "DUPLICATE DETECTED: Article %s had draft cms_id=%s but publish returned cms_id=%s. "
-                "This creates a duplicate article in CMS. Consider reviewing the CMS API behavior.",
-                prepared["article_id"],
-                existing_cms_id,
-                cms_id,
-            )
-            # We still proceed with the new cms_id since the old draft is now orphaned
-            # TODO: Consider deleting the old draft if CMS API supports it
 
         prepared["cms_id"] = cms_id
         prepared["publish_stage"] = "published"

@@ -54,12 +54,14 @@ class Publisher:
         cos_uploader: COSUploader,
         push_url: str = "",
         api_headers_provider: Callable[[], dict] | None = None,
+        user_id_provider: Callable[[], str] | None = None,
     ):
         self.api_url = api_url
         self.api_headers = api_headers
         self.api_headers_provider = api_headers_provider
         self.cos = cos_uploader
         self.push_url = push_url
+        self._user_id_provider = user_id_provider
 
     def _headers(self) -> dict:
         if self.api_headers_provider:
@@ -249,7 +251,7 @@ class Publisher:
             "is_public": bool(is_public),
             "user_id": str(article.get("user_id") or "3"),
             "chain_fixed_publish_time": 0,
-            "as_user_id": str(article.get("user_id") or "3"),
+            "as_user_id": str(article.get("as_user_id") or (self._user_id_provider() if self._user_id_provider else article.get("user_id") or "3")),
             "is_chain": True,
             "chain_airdrop_time": 0,
             "chain_airdrop_time_end": 0,
