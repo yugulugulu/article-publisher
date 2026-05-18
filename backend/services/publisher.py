@@ -206,10 +206,12 @@ class Publisher:
         source = (article.get("source") or "").strip()
         publish_strategy = (article.get("_publish_strategy") or article.get("published_strategy") or "").strip().lower()
         is_auto_publish = publish_strategy == "auto"
+        body_text_normalized = self._normalize_text_for_match("".join(parts))
+        has_inline_original_author = "原文作者" in body_text_normalized
 
-        if author:
+        if author and not has_inline_original_author:
             has_author_prefix = any(author.startswith(p) for p in ("作者", "编辑", "撰文", "编译"))
-            if has_author_prefix or "：" in author or ":" in author:
+            if author.startswith("原文作者") or has_author_prefix or "：" in author or ":" in author:
                 parts.append(f"<p>{self.html_escape(author)}</p>")
             else:
                 parts.append(f"<p>作者：{self.html_escape(author)}</p>")
@@ -218,7 +220,7 @@ class Publisher:
             if is_auto_publish and self._author_contains_source_identity(author, source):
                 pass
             else:
-                source_label = "原文" if is_auto_publish else "来源"
+                source_label = "原文"
                 parts.append(f"<p>{source_label}：{self.html_escape(source)}</p>")
 
         return "".join(parts)
