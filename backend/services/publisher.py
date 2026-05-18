@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Publisher: COS upload + CMS publish + HTML builder."""
 
 import json
@@ -73,6 +73,25 @@ class Publisher:
     @staticmethod
     def html_escape(s):
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+    @staticmethod
+    def _normalize_text_for_match(text: str) -> str:
+        return re.sub(r"\s+", "", (text or "")).lower()
+
+    @classmethod
+    def _author_contains_source_identity(cls, author: str, source: str) -> bool:
+        """Whether author/editor line already contains source identity text."""
+        author_n = cls._normalize_text_for_match(author)
+        source_n = cls._normalize_text_for_match(source)
+        if not author_n or not source_n:
+            return False
+        if source_n in author_n:
+            return True
+        aliases = (
+            "techflow", "深潮", "blockbeats", "律动", "odaily", "odaily星球日报",
+            "chaincatcher", "chainthink", "stcn", "券商中国",
+        )
+        return any(alias in author_n and alias in source_n for alias in aliases)
 
     @staticmethod
     def _strip_punctuation(text: str) -> str:
@@ -182,21 +201,25 @@ class Publisher:
                 )
             else:
                 parts.append(f"<{tag}>{self.html_escape(text)}</{tag}>")
+        # Rule 2: Append author/editor/source info at the end.
+        author = (article.get("author") or "").strip()
+        source = (article.get("source") or "").strip()
+        publish_strategy = (article.get("_publish_strategy") or article.get("published_strategy") or "").strip().lower()
+        is_auto_publish = publish_strategy == "auto"
 
-        # Rule 2: Append author, editor, and source info at the end
-        author = article.get("author", "").strip()
-        source = article.get("source", "").strip()
-
-        # 如果作者信息已包含标签（"作者｜"、"作者："、"编辑｜"、"编辑："），直接显示
-        # 否则，只有单纯的作者名时添加 "作者：" 前缀
         if author:
-            if any(author.startswith(p) for p in ("作者", "编辑")) or "｜" in author or "、" in author:
+            has_author_prefix = any(author.startswith(p) for p in ("作者", "编辑", "撰文", "编译"))
+            if has_author_prefix or "：" in author or ":" in author:
                 parts.append(f"<p>{self.html_escape(author)}</p>")
             else:
                 parts.append(f"<p>作者：{self.html_escape(author)}</p>")
 
         if source:
-            parts.append(f"<p>来源：{self.html_escape(source)}</p>")
+            if is_auto_publish and self._author_contains_source_identity(author, source):
+                pass
+            else:
+                source_label = "原文" if is_auto_publish else "来源"
+                parts.append(f"<p>{source_label}：{self.html_escape(source)}</p>")
 
         return "".join(parts)
 
@@ -314,3 +337,4 @@ class Publisher:
         if is_chainthink_auth_failure(r.status_code, data):
             raise ChainThinkAuthError("ChainThink token expired or invalid")
         raise RuntimeError(f"push failed: {r.status_code} {data}")
+

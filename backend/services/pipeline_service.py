@@ -575,6 +575,7 @@ class PipelineService:
     def save_article_draft(self, article: dict, strategy: str = "manual") -> dict:
         """Create or update a CMS draft without making it public."""
         prepared = self._merge_database_article_fields(article)
+        prepared["_publish_strategy"] = strategy
         try:
             result = self.publisher.save_draft(prepared)
         except ChainThinkAuthError as exc:
