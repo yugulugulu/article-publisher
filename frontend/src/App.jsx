@@ -2466,6 +2466,8 @@ function ProfilePage({ onLogout }) {
 
   // -- ChainThink token section --
   const [chainthinkToken, setChainthinkToken] = useState('')
+  const [chainthinkAppId, setChainthinkAppId] = useState('')
+  const [chainthinkUserId, setChainthinkUserId] = useState('')
   const [chainthinkTokenLoading, setChainthinkTokenLoading] = useState(true)
   const [chainthinkTokenSaving, setChainthinkTokenSaving] = useState(false)
 
@@ -2473,6 +2475,8 @@ function ProfilePage({ onLogout }) {
     setChainthinkTokenLoading(true)
     api.getSettings().then(data => {
       setChainthinkToken(data.chainthink_token || '')
+      setChainthinkAppId(data.chainthink_app_id || '')
+      setChainthinkUserId(data.chainthink_user_id || '')
     }).catch(console.error).finally(() => setChainthinkTokenLoading(false))
   }
 
@@ -2480,10 +2484,16 @@ function ProfilePage({ onLogout }) {
 
   const handleSaveChainthinkToken = async () => {
     const token = chainthinkToken.trim()
-    if (!token || token.startsWith('*')) return
+    const appId = chainthinkAppId.trim()
+    const userId = chainthinkUserId.trim()
+    if ((!token || token.startsWith('*')) && !appId && !userId) return
     setChainthinkTokenSaving(true)
     try {
-      await api.updateSettings({ chainthink_token: token })
+      const payload = {}
+      if (appId) payload.chainthink_app_id = appId
+      if (userId) payload.chainthink_user_id = userId
+      if (token && !token.startsWith('*')) payload.chainthink_token = token
+      await api.updateSettings(payload)
       loadChainthinkSettings()
       alert(t('saveSuccess'))
     } catch (e) {
@@ -2635,12 +2645,30 @@ function ProfilePage({ onLogout }) {
         <div className="card">
           <div className="card-header"><h2>{t('chainthinkToken')}</h2></div>
           <div className="settings-group">
-            <label>{t('chainthinkToken')}</label>
+            <label>x-app-id</label>
+            <input
+              type="text"
+              value={chainthinkAppId}
+              onChange={e => setChainthinkAppId(e.target.value)}
+              placeholder="101"
+            />
+          </div>
+          <div className="settings-group">
+            <label>x-token</label>
             <input
               type="password"
               value={chainthinkToken}
               onChange={e => setChainthinkToken(e.target.value)}
               placeholder={t('chainthinkTokenPlaceholder')}
+            />
+          </div>
+          <div className="settings-group">
+            <label>x-user-id</label>
+            <input
+              type="text"
+              value={chainthinkUserId}
+              onChange={e => setChainthinkUserId(e.target.value)}
+              placeholder="83"
             />
             <div className="hint">{t('chainthinkTokenHint')}</div>
           </div>
@@ -2648,7 +2676,14 @@ function ProfilePage({ onLogout }) {
             <button
               className="btn btn-primary"
               onClick={handleSaveChainthinkToken}
-              disabled={chainthinkTokenSaving || !chainthinkToken.trim() || chainthinkToken.trim().startsWith('*')}
+              disabled={
+                chainthinkTokenSaving ||
+                (
+                  (!chainthinkToken.trim() || chainthinkToken.trim().startsWith('*'))
+                  && !chainthinkAppId.trim()
+                  && !chainthinkUserId.trim()
+                )
+              }
             >
               {chainthinkTokenSaving ? '...' : t('save')}
             </button>

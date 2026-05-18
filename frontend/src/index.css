@@ -769,7 +769,8 @@ tr:hover td { background: var(--surface2); }
    Article Editor
    ========================================================================= */
 .editor-page {
-  max-width: 860px;
+  width: 100%;
+  max-width: 1320px;
 }
 
 .editor-field {
