@@ -204,6 +204,7 @@ class Publisher:
         # Rule 2: Append author/editor/source info at the end.
         author = (article.get("author") or "").strip()
         source = (article.get("source") or "").strip()
+        source_key = (article.get("source_key") or "").strip().lower()
         publish_strategy = (article.get("_publish_strategy") or article.get("published_strategy") or "").strip().lower()
         is_auto_publish = publish_strategy == "auto"
         body_text_normalized = self._normalize_text_for_match("".join(parts))
@@ -216,7 +217,8 @@ class Publisher:
             else:
                 parts.append(f"<p>作者：{self.html_escape(author)}</p>")
 
-        if source:
+        # TechFlow (深潮): keep author line only, skip source line entirely.
+        if source and source_key != "techflow":
             if is_auto_publish and self._author_contains_source_identity(author, source):
                 pass
             else:
@@ -339,4 +341,3 @@ class Publisher:
         if is_chainthink_auth_failure(r.status_code, data):
             raise ChainThinkAuthError("ChainThink token expired or invalid")
         raise RuntimeError(f"push failed: {r.status_code} {data}")
-
