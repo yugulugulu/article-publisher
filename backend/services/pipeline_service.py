@@ -25,6 +25,15 @@ from utils.cos import COSUploader
 
 log = logging.getLogger("pipeline")
 
+AI_EVENT_TAG = "AI大事件"
+AI_EVENT_AS_USER_ID = "1932036327095366202"
+DAILY_REPORT_AS_USER_ID = "6"
+AI_EVENT_TITLE_KEYWORDS = (
+    "ai", "openai", "gpt", "anthropic", "claude", "google", "gemini",
+    "deepmind", "xai", "特斯拉", "微软", "英伟达", "amd", "百度", "字节", "阿里",
+    "人工智能", "openclaw", "agent", "hermes",
+)
+
 
 # ---------------------------------------------------------------------------
 # State trackers
@@ -361,6 +370,43 @@ class PipelineService:
         raw = raw_id or article_id
         return f"{source_key}:{raw}" if raw else raw
 
+    @staticmethod
+    def _title_matches_ai_event(title: str) -> bool:
+        text = (title or "").strip().lower()
+        if not text:
+            return False
+        return any(keyword in text for keyword in AI_EVENT_TITLE_KEYWORDS)
+
+    @staticmethod
+    def _merge_tags_with_ai_event(tags: list[str] | None, should_add_ai_event: bool) -> list[str]:
+        merged: list[str] = []
+        for tag in tags or []:
+            tag_text = str(tag).strip()
+            if tag_text and tag_text not in merged:
+                merged.append(tag_text)
+
+        if should_add_ai_event and AI_EVENT_TAG not in merged:
+            if len(merged) >= 5:
+                merged[-1] = AI_EVENT_TAG
+            else:
+                merged.append(AI_EVENT_TAG)
+        return merged
+
+    def _apply_column_routing(self, article: dict, strategy: str = "") -> dict:
+        routed = dict(article)
+        strategy_key = (strategy or "").strip().lower()
+
+        # Daily report has highest priority and must stay in the daily column.
+        if strategy_key == "daily_report":
+            routed["user_id"] = DAILY_REPORT_AS_USER_ID
+            routed["as_user_id"] = DAILY_REPORT_AS_USER_ID
+            return routed
+
+        if self._title_matches_ai_event(routed.get("title", "")):
+            routed["user_id"] = AI_EVENT_AS_USER_ID
+            routed["as_user_id"] = AI_EVENT_AS_USER_ID
+        return routed
+
     def _store_and_score_article(self, article: dict):
         """Persist article, generate abstract, score it and assign a review lane.
 
@@ -394,6 +440,11 @@ class PipelineService:
             return
 
         score_result = self.scorer.score_article(article)
+        score_result["tags"] = self._merge_tags_with_ai_event(
+            score_result.get("tags"),
+            self._title_matches_ai_event(article.get("title", "")),
+        )
+        article["tags"] = score_result["tags"]
         self.database.update_scoring(
             article_id=article["article_id"],
             score=score_result["score"],
@@ -575,6 +626,7 @@ class PipelineService:
     def save_article_draft(self, article: dict, strategy: str = "manual") -> dict:
         """Create or update a CMS draft without making it public."""
         prepared = self._merge_database_article_fields(article)
+        prepared = self._apply_column_routing(prepared, strategy)
         prepared["_publish_strategy"] = strategy
         try:
             result = self.publisher.save_draft(prepared)
@@ -591,6 +643,7 @@ class PipelineService:
     def publish_article(self, article: dict, strategy: str = "manual") -> dict:
         """Create or update a CMS article and make it public."""
         prepared = self._merge_database_article_fields(article)
+        prepared = self._apply_column_routing(prepared, strategy)
         try:
             result = self.publisher.publish(prepared)
         except ChainThinkAuthError as exc:
@@ -658,6 +711,7 @@ class PipelineService:
         Used by AutoPublishScheduler for the unified publish+push flow.
         """
         prepared = self._merge_database_article_fields(article)
+        prepared = self._apply_column_routing(prepared, strategy)
 
         # Clear any stale cms_id from a previous draft — CMS API creates a new article
         # when publishing, even if an existing cms_id is provided, causing duplicates.

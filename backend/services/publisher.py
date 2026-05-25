@@ -256,6 +256,7 @@ class Publisher:
                 log.warning("Cover upload failed for %s: %s", article.get("article_id_full", ""), exc)
 
         article_id = str(article.get("cms_id") or "0")
+        payload_user_id = str(article.get("user_id") or "3")
         payload = {
             "id": article_id,
             "info": {"cover_image": cover_image} if cover_image else {},
@@ -276,9 +277,9 @@ class Publisher:
             "is_push_bian": 2,
             "content_pin_top": 0,
             "is_public": bool(is_public),
-            "user_id": str(article.get("user_id") or "3"),
+            "user_id": payload_user_id,
             "chain_fixed_publish_time": 0,
-            "as_user_id": str(article.get("as_user_id") or (self._user_id_provider() if self._user_id_provider else article.get("user_id") or "3")),
+            "as_user_id": payload_user_id,
             "is_chain": True,
             "chain_airdrop_time": 0,
             "chain_airdrop_time_end": 0,
